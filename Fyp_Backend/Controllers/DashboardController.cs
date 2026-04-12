@@ -300,6 +300,7 @@ namespace Fyp_Backend.Controllers
                 return StatusCode(500, new { message = "Error fetching worker details: " + ex.Message, detail = ex.ToString() });
             }
         }
+        //Hello mic check this out, I added a new API to fetch all categories with their related skills for the filter options on the frontend. It returns a structured JSON that groups skills under their respective categories, which should make it easier to render the filter UI. Let me know if you want me to adjust the structure or add any additional data!
 
         [HttpGet("GetFiltersData")]
         public async Task<IActionResult> GetFiltersData()
