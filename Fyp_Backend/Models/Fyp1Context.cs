@@ -118,6 +118,33 @@ public partial class Fyp1Context : DbContext
                 .HasConstraintName("FK__Reviews__Intervi__5FB337D6");
         });
 
+        modelBuilder.Entity<Resignation>(entity =>
+        {
+            entity.ToTable("Resignation");
+            entity.HasKey(e => e.ResignationId);
+            entity.Property(e => e.ResignationId).HasColumnName("Resignation_ID");
+            entity.Property(e => e.InterviewId).HasColumnName("Interview_ID");
+            entity.Property(e => e.ResignationReason).HasColumnName("Resignation_Reason").HasColumnType("text");
+            entity.Property(e => e.LastWorkingDate).HasColumnName("Last_Working_Date").HasColumnType("date");
+            entity.Property(e => e.SubmittedDate).HasColumnName("Submitted_Date").HasColumnType("datetime");
+            
+            entity.HasOne(d => d.Interview).WithMany(p => p.Resignations)
+                .HasForeignKey(d => d.InterviewId);
+        });
+
+        modelBuilder.Entity<Termination>(entity =>
+        {
+            entity.ToTable("Termination");
+            entity.HasKey(e => e.TerminationId);
+            entity.Property(e => e.TerminationId).HasColumnName("Termination_ID");
+            entity.Property(e => e.InterviewId).HasColumnName("Interview_ID");
+            entity.Property(e => e.TerminatedDate).HasColumnName("Terminated_Date");
+            entity.Property(e => e.TerminatedReason).HasColumnName("Terminated_Reason").HasColumnType("text");
+
+            entity.HasOne(d => d.Interview).WithMany(p => p.Terminations)
+                .HasForeignKey(d => d.InterviewId);
+        });
+
         modelBuilder.Entity<Skill>(entity =>
         {
             entity.HasKey(e => e.SkillsId).HasName("PK__Skills__7569047CFE2BC2EA");

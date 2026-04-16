@@ -35,7 +35,6 @@ namespace Fyp_Backend.Controllers
                 if (imagePath == "Invalid") return BadRequest(new { message = "Only .jpg, .jpeg, and .png files are allowed." });
 
                 model.Picture = imagePath;
-                model.Password = BCrypt.Net.BCrypt.HashPassword(model.Password);
                 _context.Clients.Add(model);
                 await _context.SaveChangesAsync();
 
@@ -76,7 +75,7 @@ namespace Fyp_Backend.Controllers
                 // 3. Update Password if provided and changed
                 if (!string.IsNullOrEmpty(model.Password) && model.Password != "********")
                 {
-                    existingClient.Password = BCrypt.Net.BCrypt.HashPassword(model.Password);
+                    existingClient.Password = model.Password;
                 }
 
                 await _context.SaveChangesAsync();
@@ -101,7 +100,6 @@ namespace Fyp_Backend.Controllers
                 if (imagePath == "Invalid") return BadRequest(new { message = "Invalid image." });
 
                 model.Picture = imagePath;
-                model.Password = BCrypt.Net.BCrypt.HashPassword(model.Password);
                 model.AvailableStatus = true;
 
                 // 1. Insert Worker first to generate ID
@@ -112,26 +110,28 @@ namespace Fyp_Backend.Controllers
                 if (!string.IsNullOrEmpty(experiencesJson))
                 {
                     var experiences = JsonConvert.DeserializeObject<List<Experience>>(experiencesJson);
-                    foreach (var exp in experiences)
+                    if (experiences != null)
                     {
-                        exp.WorkerId = model.WorkerId; 
-                        _context.Experiences.Add(exp);
-
-                        // Check if this Worker+Category+Skill combo is already being added (to avoid EF tracking errors)
-                        var exists = await _context.WorkerCategories.AnyAsync(wc => 
-                            wc.WorkerId == model.WorkerId && 
-                            wc.CategoryId == (exp.CategoryId ?? 0) &&
-                            wc.SkillsId == (exp.SkillsId ?? 0));
-
-                        if (!exists)
+                        var uniqueJunctions = new HashSet<(int, int)>();
+                        foreach (var exp in experiences)
                         {
-                            var junction = new WorkerCategory
+                            exp.WorkerId = model.WorkerId;
+                            exp.ExperienceId = 0; // Ensure it is treated as new
+                            _context.Experiences.Add(exp);
+
+                            int catId = exp.CategoryId ?? 0;
+                            int skillId = exp.SkillsId ?? 0;
+
+                            if (catId > 0 && skillId > 0 && !uniqueJunctions.Contains((catId, skillId)))
                             {
-                                WorkerId = model.WorkerId,
-                                CategoryId = exp.CategoryId ?? 0,
-                                SkillsId = exp.SkillsId ?? 0
-                            };
-                            _context.WorkerCategories.Add(junction);
+                                uniqueJunctions.Add((catId, skillId));
+                                _context.WorkerCategories.Add(new WorkerCategory
+                                {
+                                    WorkerId = model.WorkerId,
+                                    CategoryId = catId,
+                                    SkillsId = skillId
+                                });
+                            }
                         }
                     }
                     await _context.SaveChangesAsync();
@@ -179,9 +179,9 @@ namespace Fyp_Backend.Controllers
                 existingWorker.CategoryId = model.CategoryId;
 
                 // 3. Update Password if provided and changed
-                if (!string.IsNullOrEmpty(model.Password) && model.Password != "********" && !model.Password.StartsWith("$2a$"))
+                if (!string.IsNullOrEmpty(model.Password) && model.Password != "********")
                 {
-                    existingWorker.Password = BCrypt.Net.BCrypt.HashPassword(model.Password);
+                    existingWorker.Password = model.Password;
                 }
 
                 // 4. Update Skills/Experiences (Replace approach for simplicity and consistency)

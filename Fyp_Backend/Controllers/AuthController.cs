@@ -37,19 +37,7 @@ namespace Fyp_Backend.Controllers
                 {
                     var client = await _context.Clients.FirstOrDefaultAsync(c => c.Email == model.EmailOrCnic);
 
-                    bool isClientPasswordValid = false;
-                    if (client != null)
-                    {
-                        try
-                        {
-                            isClientPasswordValid = BCrypt.Net.BCrypt.Verify(model.Password, client.Password);
-                        }
-                        catch (Exception)
-                        {
-                            // Password was stored as plain text (before BCrypt was added)
-                            isClientPasswordValid = client.Password == model.Password;
-                        }
-                    }
+                    bool isClientPasswordValid = client != null && client.Password == model.Password;
 
                     if (client == null || !isClientPasswordValid)
                     {
@@ -72,17 +60,7 @@ namespace Fyp_Backend.Controllers
                 else if (model.Role == "Worker")
                 {
                     var worker = await _context.Workers.FirstOrDefaultAsync(w => w.Cnic == model.EmailOrCnic);
-                    bool isPasswordValid = false;
-                    if (worker != null) {
-                        try
-                        {
-                            isPasswordValid = BCrypt.Net.BCrypt.Verify(model.Password, worker.Password);
-                        }
-                        catch (Exception)
-                        {
-                            isPasswordValid = worker.Password == model.Password;
-                        }
-                    }
+                    bool isPasswordValid = worker != null && worker.Password == model.Password;
 
                     if (worker == null || !isPasswordValid)
                     {

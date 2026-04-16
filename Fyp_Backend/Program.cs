@@ -7,7 +7,12 @@ using Scalar.AspNetCore;
 
 var builder = WebApplication.CreateBuilder(args);
 
-builder.Services.AddControllers();
+builder.Services.AddControllers()
+    .AddJsonOptions(options =>
+    {
+        options.JsonSerializerOptions.Converters.Add(new DateOnlyJsonConverter());
+    });
+
 builder.Services.AddOpenApi(); // This is the new .NET 9 default
 builder.Services.AddSwaggerGen(); 
 
@@ -65,3 +70,16 @@ app.UseAuthorization();
 app.MapControllers();
 
 app.Run();
+
+public class DateOnlyJsonConverter : System.Text.Json.Serialization.JsonConverter<DateOnly>
+{
+    public override DateOnly Read(ref System.Text.Json.Utf8JsonReader reader, Type typeToConvert, System.Text.Json.JsonSerializerOptions options)
+    {
+        return DateOnly.Parse(reader.GetString()!);
+    }
+
+    public override void Write(System.Text.Json.Utf8JsonWriter writer, DateOnly value, System.Text.Json.JsonSerializerOptions options)
+    {
+        writer.WriteStringValue(value.ToString("yyyy-MM-dd"));
+    }
+}
