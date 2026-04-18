@@ -132,7 +132,8 @@ namespace Fyp_Backend.Controllers
                         phone = w.Phone,
                         picture = w.Picture,
                         rating = avgRating.ToString("F1"),
-                        categories = categoryNames
+                        categories = categoryNames,
+                        gender= w.Gender
                     });
                 }
 
