@@ -14,7 +14,7 @@ builder.Services.AddControllers()
     });
 
 builder.Services.AddOpenApi(); // This is the new .NET 9 default
-builder.Services.AddSwaggerGen(); 
+builder.Services.AddSwaggerGen();
 
 // Add JWT Authentication
 builder.Services.AddAuthentication(JwtBearerDefaults.AuthenticationScheme)
@@ -35,6 +35,12 @@ builder.Services.AddAuthentication(JwtBearerDefaults.AuthenticationScheme)
 // Add CORS
 builder.Services.AddCors(options =>
 {
+    options.AddPolicy("AllowNextJs", policy =>
+    {
+        policy.WithOrigins("http://localhost:3000")
+              .AllowAnyHeader()
+              .AllowAnyMethod();
+    });
     options.AddPolicy("AllowAll",
         builder =>
         {
@@ -44,8 +50,8 @@ builder.Services.AddCors(options =>
         });
 });
 
-var provider=builder.Services.BuildServiceProvider();
-var config=provider.GetRequiredService<IConfiguration>();
+var provider = builder.Services.BuildServiceProvider();
+var config = provider.GetRequiredService<IConfiguration>();
 builder.Services.AddDbContext<Fyp1Context>(items => items.UseSqlServer(config.GetConnectionString("fyp1")));
 var app = builder.Build();
 
@@ -63,6 +69,7 @@ app.UseStaticFiles(); // Serves files from wwwroot (e.g. /images/photo.jpg)
 // app.UseHttpsRedirection();
 
 app.UseCors("AllowAll");
+app.UseCors("AllowNextJs");
 
 app.UseAuthentication();
 app.UseAuthorization();
