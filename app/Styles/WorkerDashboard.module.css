@@ -1,0 +1,477 @@
+.container {
+  min-height: 100vh;
+  background-color: #FFF;
+  max-width: 500px;
+  margin: 0 auto;
+}
+
+.scrollContent {
+  padding: 20px;
+}
+
+/* Loader */
+.loaderContainer {
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  min-height: 100vh;
+}
+
+.spinner {
+  width: 40px;
+  height: 40px;
+  border: 4px solid #f3f3f3;
+  border-top: 4px solid #1E64D3;
+  border-radius: 50%;
+  animation: spin 1s linear infinite;
+}
+
+@keyframes spin {
+  0% { transform: rotate(0deg); }
+  100% { transform: rotate(360deg); }
+}
+
+/* Header */
+.header {
+  display: flex;
+  flex-direction: row;
+  justify-content: space-between;
+  align-items: flex-start;
+  margin-bottom: 20px;
+}
+
+.greeting {
+  font-size: 14px;
+  color: #888;
+  margin: 0;
+}
+
+.workerName {
+  font-size: 22px;
+  font-weight: bold;
+  margin: 0;
+  color: #000;
+}
+
+.roleRow {
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+  flex-wrap: wrap;
+}
+
+.workerRole {
+  font-size: 28px;
+  color: #1E64D3;
+  font-weight: bold;
+}
+
+.ageBadge {
+  font-size: 16px;
+  color: #444;
+  font-weight: 600;
+}
+
+.headerButtons {
+  display: flex;
+  flex-direction: row;
+  margin-top: 10px;
+  gap: 10px;
+}
+
+.logoutBtn,
+.editBtn {
+  background-color: #1E64D3;
+  padding: 8px 20px;
+  border-radius: 20px;
+  border: none;
+  cursor: pointer;
+}
+
+.logoutBtn:hover,
+.editBtn:hover {
+  opacity: 0.9;
+}
+
+.btnTextWhite {
+  color: #FFF;
+  font-weight: bold;
+  font-size: 14px;
+}
+
+.profileImage {
+  width: 80px;
+  height: 80px;
+  border-radius: 50%;
+  object-fit: cover;
+  flex-shrink: 0;
+}
+
+/* Action Card */
+.actionCard {
+  background-color: #E0E0E0;
+  border-radius: 15px;
+  padding: 15px;
+  margin-bottom: 15px;
+}
+
+.sectionHeader {
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+  margin-bottom: 5px;
+}
+
+.sectionTitle {
+  font-size: 18px;
+  font-weight: bold;
+  margin-left: 10px;
+}
+
+.actionSubtext {
+  font-size: 14px;
+  color: #555;
+  margin: 0 0 15px 0;
+}
+
+.terminateBtn {
+  background-color: #FFF;
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+  justify-content: center;
+  height: 45px;
+  border-radius: 25px;
+  border: 1px solid #FF4D4D;
+  width: 100%;
+  cursor: pointer;
+}
+
+.terminateBtn:hover {
+  background-color: #FFF5F5;
+}
+
+.terminateText {
+  color: #FF4D4D;
+  font-weight: bold;
+  margin-left: 10px;
+}
+
+/* Status Card */
+.statusCard {
+  background-color: #FFF;
+  border-radius: 15px;
+  padding: 15px;
+  margin-bottom: 15px;
+  box-shadow: 0 3px 8px rgba(0, 0, 0, 0.1);
+}
+
+.statusRow {
+  display: flex;
+  flex-direction: row;
+  justify-content: space-between;
+  align-items: center;
+}
+
+.cardTitle {
+  font-size: 18px;
+  font-weight: bold;
+  margin: 0;
+}
+
+.cardSubtext {
+  font-size: 12px;
+  color: #888;
+  margin: 0;
+}
+
+/* Switch */
+.switch {
+  position: relative;
+  display: inline-block;
+  width: 50px;
+  height: 28px;
+}
+
+.switch input {
+  opacity: 0;
+  width: 0;
+  height: 0;
+}
+
+.slider {
+  position: absolute;
+  cursor: pointer;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  background-color: #767577;
+  transition: 0.3s;
+  border-radius: 28px;
+}
+
+.slider:before {
+  position: absolute;
+  content: "";
+  height: 22px;
+  width: 22px;
+  left: 3px;
+  bottom: 3px;
+  background-color: #FFF;
+  transition: 0.3s;
+  border-radius: 50%;
+  box-shadow: 0 2px 4px rgba(0, 0, 0, 0.2);
+}
+
+.switch input:checked + .slider {
+  background-color: #4CAF50;
+}
+
+.switch input:checked + .slider:before {
+  transform: translateX(22px);
+}
+
+/* Notification Tab */
+.notifTab {
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+  background-color: #FFF;
+  border-radius: 15px;
+  padding: 12px;
+  margin-bottom: 10px;
+  border: 1px solid #DDD;
+  width: 100%;
+  cursor: pointer;
+  text-align: left;
+}
+
+.notifTab:hover {
+  background-color: #FAFAFA;
+}
+
+.notifIconBg {
+  background-color: #F0F0F0;
+  padding: 8px;
+  border-radius: 10px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.notifTextContent {
+  flex: 1;
+  margin-left: 15px;
+}
+
+.notifTitle {
+  font-weight: bold;
+  font-size: 16px;
+  margin: 0;
+}
+
+.notifSub {
+  font-size: 11px;
+  color: #888;
+  margin: 0;
+}
+
+.badge {
+  background-color: #D32F2F;
+  width: 24px;
+  height: 24px;
+  border-radius: 50%;
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  flex-shrink: 0;
+}
+
+.badgeText {
+  color: #FFF;
+  font-weight: bold;
+  font-size: 12px;
+}
+
+/* Check Status Button */
+.checkStatusBtn {
+  background-color: #FF0000;
+  height: 45px;
+  border-radius: 25px;
+  width: 100%;
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  margin: 10px 0;
+  border: none;
+  cursor: pointer;
+}
+
+.checkStatusBtn:hover {
+  opacity: 0.9;
+}
+
+/* Main Heading */
+.mainHeading {
+  font-size: 18px;
+  font-weight: bold;
+  margin: 20px 0 10px 0;
+  color: #000;
+}
+
+/* Detail Row */
+.detailRow {
+  display: flex;
+  flex-direction: row;
+  justify-content: space-between;
+  padding: 12px 0;
+  border-bottom: 1px solid #EEE;
+}
+
+.detailLabel {
+  color: #555;
+}
+
+.detailValue {
+  font-weight: bold;
+}
+
+/* Experience */
+.expItem {
+  display: flex;
+  flex-direction: row;
+  min-height: 100px;
+}
+
+.timeline {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  margin-right: 15px;
+}
+
+.dot {
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  background-color: #CCC;
+  flex-shrink: 0;
+}
+
+.activeDot {
+  background-color: #2196F3;
+}
+
+.line {
+  flex: 1;
+  width: 2px;
+  background-color: #EEE;
+}
+
+.expContent {
+  flex: 1;
+  padding-bottom: 20px;
+}
+
+.expTitle {
+  font-weight: bold;
+  font-size: 15px;
+  margin: 0;
+}
+
+.expBullet {
+  font-size: 13px;
+  color: #777;
+  font-style: italic;
+  margin-top: 3px;
+  margin-bottom: 0;
+}
+
+.expPeriod {
+  font-size: 11px;
+  color: #999;
+  margin-top: 5px;
+  text-align: right;
+}
+
+/* Skills */
+.skillsContainer {
+  display: flex;
+  flex-direction: row;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin-top: 5px;
+  align-items: center;
+}
+
+.skillBadge {
+  background-color: #DDD;
+  padding: 10px 20px;
+  border-radius: 20px;
+}
+
+.skillText {
+  font-weight: bold;
+  font-size: 14px;
+}
+
+.addSkillBtn {
+  padding: 10px 20px;
+  border-radius: 20px;
+  border: 1px solid #1E64D3;
+  background-color: transparent;
+  cursor: pointer;
+}
+
+.addSkillBtn:hover {
+  background-color: #F0F7FF;
+}
+
+.addSkillText {
+  color: #1E64D3;
+  font-weight: bold;
+}
+
+/* Reviews */
+.reviewsRow {
+  display: flex;
+  flex-direction: row;
+  justify-content: space-between;
+  align-items: center;
+  margin-top: 5px;
+}
+
+.ratingBox {
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+  background-color: #F5F5F5;
+  padding: 10px;
+  border-radius: 20px;
+}
+
+.ratingText {
+  font-size: 20px;
+  font-weight: bold;
+  margin-left: 8px;
+}
+
+.viewReviewsBtn {
+  background-color: #1E64D3;
+  padding: 12px 30px;
+  border-radius: 25px;
+  border: none;
+  cursor: pointer;
+}
+
+.viewReviewsBtn:hover {
+  opacity: 0.9;
+}
+
+.emptyText {
+  color: #999;
+  font-style: italic;
+  margin-top: 5px;
+  font-size: 13px;
+}

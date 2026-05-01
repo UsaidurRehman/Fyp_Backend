@@ -1,0 +1,34 @@
+.pageWrapper { min-height: 100vh; background: #fff; }
+.navHeader { display: flex; align-items: center; justify-content: space-between; padding: 15px; border-bottom: 1px solid #eee; sticky top: 0; background: #fff; }
+.backBtn { padding: 8px; border-radius: 50%; border: none; background: #f0f0f0; cursor: pointer; }
+.navTitle { font-size: 18px; font-weight: bold; }
+
+.contentContainer { max-width: 600px; margin: 0 auto; padding: 20px; }
+.sectionHeading { font-size: 16px; font-weight: bold; margin: 20px 0 10px; color: #333; }
+
+.skillGrid { display: flex; justify-content: space-between; gap: 10px; margin-bottom: 25px; }
+.skillBox { width: 32%; height: 100px; border: none; border-radius: 15px; display: flex; flex-direction: column; align-items: center; justify-content: center; box-shadow: 0 4px 12px rgba(0,0,0,0.08); cursor: pointer; transition: all 0.2s; background: #fff; }
+.selectedBox { background: #008000; }
+.disabledBox { opacity: 0.3; cursor: not-allowed; }
+
+.iconBg { width: 50px; height: 50px; border-radius: 50%; background: #F0EAF8; display: flex; align-items: center; justify-content: center; margin-bottom: 5px; }
+.iconBgActive { background: rgba(255,255,255,0.2); }
+.label { font-weight: bold; font-size: 13px; color: #000; }
+.selectedLabel { font-weight: bold; font-size: 13px; color: #fff; }
+
+.expertiseCard { background: #fff; border: 1px solid #eee; border-radius: 25px; padding: 20px; margin-bottom: 20px; box-shadow: 0 4px 15px rgba(0,0,0,0.05); }
+.cardSuccess { border: 2px solid #008000; background: #f0fff0; }
+.cardHeader { display: flex; align-items: center; gap: 15px; margin-bottom: 15px; }
+.iconCircle { width: 45px; height: 45px; border-radius: 50%; background: #D7E6FF; display: flex; align-items: center; justify-content: center; }
+
+.subHeading { font-size: 12px; font-weight: 900; color: #666; text-transform: uppercase; margin-bottom: 8px; }
+.chipContainer { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 15px; }
+.skillChip { background: #eee; padding: 6px 12px; border-radius: 10px; font-size: 12px; }
+
+.inputWrapper { display: flex; align-items: center; border: 1px solid #ddd; border-radius: 12px; padding: 0 12px; height: 45px; margin-bottom: 10px; background: #fff; }
+.inputField { flex: 1; border: none; outline: none; font-size: 14px; background: transparent; margin: 0 10px; }
+
+.submitExpBtn { margin-left: auto; display: block; background: #1E64D3; color: #fff; padding: 10px 25px; border-radius: 15px; border: none; font-weight: bold; cursor: pointer; }
+.continueBtn { width: 100%; height: 55px; background: #1E64D3; color: #fff; border-radius: 25px; border: none; font-weight: bold; font-size: 16px; margin: 20px 0; cursor: pointer; }
+.spinner { animation: spin 1s linear infinite; }
+@keyframes spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
