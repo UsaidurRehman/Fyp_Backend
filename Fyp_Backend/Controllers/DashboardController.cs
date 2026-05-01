@@ -18,6 +18,11 @@ namespace Fyp_Backend.Controllers
         {
             _context = context;
         }
+        [HttpGet]
+        public IActionResult Get()
+        {
+            return Ok(new { message = "Dashboard API is working!" });
+        }   
 
         // For Worker's own dashboard (shows workers linked to a client account)
         [HttpGet("GetWorkers")]
@@ -132,8 +137,8 @@ namespace Fyp_Backend.Controllers
                         phone = w.Phone,
                         picture = w.Picture,
                         rating = avgRating.ToString("F1"),
+                        gender = w.Gender ?? "N/A",
                         categories = categoryNames,
-                        gender= w.Gender
                     });
                 }
 
