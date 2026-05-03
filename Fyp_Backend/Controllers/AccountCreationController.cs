@@ -99,7 +99,10 @@ namespace Fyp_Backend.Controllers
                 string imagePath = await SaveImage(model.PictureFile, model.Cnic);
                 if (imagePath == "Invalid") return BadRequest(new { message = "Invalid image." });
 
-                model.Picture = imagePath;
+                if (imagePath != null) 
+                {
+                    model.Picture = imagePath;
+                }
                 model.AvailableStatus = true;
 
                 // 1. Insert Worker first to generate ID

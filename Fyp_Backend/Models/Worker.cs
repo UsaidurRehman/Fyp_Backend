@@ -8,31 +8,19 @@ public partial class Worker
 {
     public int WorkerId { get; set; }
 
-    public string Name { get; set; } = null!;
-
-    public string Cnic { get; set; } = null!;
-
-    public string Phone { get; set; } = null!;
-
+    public string? Name { get; set; }
+    public string? Cnic { get; set; }
+    public string? Phone { get; set; }
     public decimal? Salary { get; set; }
-
     public string? Address { get; set; }
-
-    public string Picture { get; set; } = "worker_default.jpg";
-
+    public string? Picture { get; set; } = "worker_default.jpg";
     [NotMapped]
     public IFormFile? PictureFile { get; set; }
-
     public bool? AvailableStatus { get; set; }
-
     public int? CategoryId { get; set; }
-
     public int? Age { get; set; }
-
-    public string Password { get; set; } = null!;
-
+    public string? Password { get; set; }
     public string? Gender { get; set; }
-
     public string? Bio { get; set; }
 
     public virtual Category? Category { get; set; }

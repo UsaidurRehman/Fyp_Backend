@@ -22,7 +22,7 @@ namespace Fyp_Backend.Controllers
         public IActionResult Get()
         {
             return Ok(new { message = "Dashboard API is working!" });
-        }   
+        }
 
         // For Worker's own dashboard (shows workers linked to a client account)
         [HttpGet("GetWorkers")]
@@ -61,9 +61,8 @@ namespace Fyp_Backend.Controllers
         {
             try
             {
-                var query = _context.Workers
-                    .Include(w => w.Category)
-                    .Where(w => w.AvailableStatus == true); // Only show available workers
+                IQueryable<Worker> query = _context.Workers
+                    .Include(w => w.Category); // Cast to IQueryable to avoid type mismatch on reassignment
 
                 // Filter by category names (Matches ANY of the selected categories)
                 if (categories != null && categories.Any() && !categories.Contains("All"))
@@ -139,6 +138,7 @@ namespace Fyp_Backend.Controllers
                         rating = avgRating.ToString("F1"),
                         gender = w.Gender ?? "N/A",
                         categories = categoryNames,
+                        availableStatus = w.AvailableStatus ?? false, // Added this
                     });
                 }
 
@@ -178,7 +178,7 @@ namespace Fyp_Backend.Controllers
                         i.WorkerDecision != "Rejected" &&
                         i.HiringDecision != "Rejected" &&
                         i.Status != "Rejected" &&
-                        i.Status != "Completed" && 
+                        i.Status != "Completed" &&
                         i.Status != "Terminated"
                     );
                     hasActiveInterview = activeInt != null;
@@ -270,7 +270,7 @@ namespace Fyp_Backend.Controllers
                     location = worker.Address ?? "N/A",
                     salary = worker.Salary != null ? worker.Salary.ToString() : "Not Set",
                     gender = worker.Gender ?? "N/A",
-                    availability = worker.AvailableStatus == true ? "Available 24/7" : "Currently Booked",
+                    availability = worker.AvailableStatus == true ? "Available 24/7" : "NOT AVAILABLE", // Changed to NOT AVAILABLE as requested
                     rating = avgRating.ToString("F1"),
                     reviewCount = allReviews.Count,
                     pendingRequestCount = pendingRequestCount,
@@ -422,8 +422,8 @@ namespace Fyp_Backend.Controllers
                 var today = DateOnly.FromDateTime(DateTime.Now);
                 var expiredResignations = await _context.Resignations
                     .Include(r => r.Interview)
-                    .Where(r => r.Interview.ClientId == clientId && 
-                               r.Interview.Status == "Finalized" && 
+                    .Where(r => r.Interview.ClientId == clientId &&
+                               r.Interview.Status == "Finalized" &&
                                r.LastWorkingDate < today)
                     .ToListAsync();
 
@@ -502,7 +502,7 @@ namespace Fyp_Backend.Controllers
                 .ToList();
 
                 var pendingCount = await _context.Interviews
-                    .CountAsync(i => i.ClientId == clientId && i.Status == "InterviewScheduled" && i.HiringDecision == null);
+                    .CountAsync(i => i.ClientId == clientId && i.Status == "Pending");
 
                 return Ok(new
                 {
@@ -761,7 +761,7 @@ namespace Fyp_Backend.Controllers
                     { // Accepted by client
                         if (item.status == "Hired")
                         {
-                            type = "final"; 
+                            type = "final";
                             msg = "Offer Accepted! Waiting for client to start the contract.";
                             displayStatus = "Accepted";
                         }
@@ -985,8 +985,8 @@ namespace Fyp_Backend.Controllers
             catch (Exception ex)
             {
                 // Concise error for mobile display
-                var finalMsg = ex.InnerException?.InnerException?.Message 
-                               ?? ex.InnerException?.Message 
+                var finalMsg = ex.InnerException?.InnerException?.Message
+                               ?? ex.InnerException?.Message
                                ?? ex.Message;
                 return StatusCode(500, new { message = "DB Error: " + finalMsg });
             }
@@ -997,7 +997,7 @@ namespace Fyp_Backend.Controllers
         {
             try
             {
-                var userIdStr = User.FindFirst(ClaimTypes.NameIdentifier)?.Value 
+                var userIdStr = User.FindFirst(ClaimTypes.NameIdentifier)?.Value
                              ?? User.FindFirst(System.IdentityModel.Tokens.Jwt.JwtRegisteredClaimNames.Sub)?.Value;
 
                 if (string.IsNullOrEmpty(userIdStr))
@@ -1046,11 +1046,11 @@ namespace Fyp_Backend.Controllers
                     return NotFound(new { message = "Resignation not found." });
 
                 var worker = resignation.Interview?.Worker;
-                
+
                 var submitted = resignation.SubmittedDate ?? DateTime.Now.AddDays(-15);
                 var lastDayRaw = resignation.LastWorkingDate;
                 var lastDay = lastDayRaw.ToDateTime(TimeOnly.MinValue);
-                
+
                 int totalNoticeDays = (lastDay - submitted).Days;
                 if (totalNoticeDays <= 0) totalNoticeDays = 30;
 
@@ -1199,13 +1199,32 @@ namespace Fyp_Backend.Controllers
                 return StatusCode(500, new { message = "Error: " + ex.Message });
             }
         }
-    }
 
-    public class TerminationRequest
-    {
-        public int InterviewId { get; set; }
-        public string Reason { get; set; } = null!;
-        public string? Remarks { get; set; }
-        public int Rating { get; set; }
+        [HttpPut("UpdateDutyStatus/{workerId}")]
+        public async Task<IActionResult> UpdateDutyStatus(int workerId, [FromBody] bool isAvailable)
+        {
+            try
+            {
+                var worker = await _context.Workers.FindAsync(workerId);
+                if (worker == null) return NotFound(new { message = "Worker not found." });
+
+                worker.AvailableStatus = isAvailable;
+                await _context.SaveChangesAsync();
+
+                return Ok(new { status = "Success", message = "Duty status updated!", isAvailable = worker.AvailableStatus });
+            }
+            catch (Exception ex)
+            {
+                return StatusCode(500, new { message = "Error updating duty status: " + ex.Message });
+            }
+        }
+
+        public class TerminationRequest
+        {
+            public int InterviewId { get; set; }
+            public string Reason { get; set; } = null!;
+            public string? Remarks { get; set; }
+            public int Rating { get; set; }
+        }
     }
 }
