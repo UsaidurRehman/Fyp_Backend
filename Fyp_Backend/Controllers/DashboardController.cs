@@ -271,6 +271,7 @@ namespace Fyp_Backend.Controllers
                     salary = worker.Salary != null ? worker.Salary.ToString() : "Not Set",
                     gender = worker.Gender ?? "N/A",
                     availability = worker.AvailableStatus == true ? "Available 24/7" : "NOT AVAILABLE", // Changed to NOT AVAILABLE as requested
+                    availableStatus = worker.AvailableStatus ?? false, // Needed for Duty Status Toggle
                     rating = avgRating.ToString("F1"),
                     reviewCount = allReviews.Count,
                     pendingRequestCount = pendingRequestCount,
