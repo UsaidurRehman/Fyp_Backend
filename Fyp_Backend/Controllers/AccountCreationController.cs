@@ -4,7 +4,6 @@ using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
 using Newtonsoft.Json;
 
-
 namespace Fyp_Backend.Controllers
 {
     [Route("api/[controller]")]
@@ -28,7 +27,6 @@ namespace Fyp_Backend.Controllers
                 if (await _context.Clients.AnyAsync(c => c.Email == model.Email))
                     return BadRequest(new { message = "Email is already registered." });
 
-                // Use Email to create a unique filename (replacing characters that aren't file-friendly)
                 string safeFileName = model.Email.Replace("@", "_").Replace(".", "_");
                 string imagePath = await SaveImage(model.PictureFile, safeFileName);
 
@@ -42,7 +40,7 @@ namespace Fyp_Backend.Controllers
             }
             catch (Exception ex)
             {
-                return StatusCode(500, new { message = "Error: " + ex.InnerException?.Message ?? ex.Message });
+                return StatusCode(500, new { message = "Error: " + (ex.InnerException?.Message ?? ex.Message) });
             }
         }
 
@@ -55,7 +53,6 @@ namespace Fyp_Backend.Controllers
                 if (existingClient == null)
                     return NotFound(new { message = "Client not found." });
 
-                // 1. Update Profile Picture if new one uploaded
                 if (model.PictureFile != null)
                 {
                     string safeFileName = model.Email.Replace("@", "_").Replace(".", "_");
@@ -66,13 +63,11 @@ namespace Fyp_Backend.Controllers
                     }
                 }
 
-                // 2. Update Basic Fields
                 existingClient.Name = model.Name;
                 existingClient.Phone = model.Phone;
                 existingClient.Address = model.Address;
                 existingClient.Email = model.Email;
 
-                // 3. Update Password if provided and changed
                 if (!string.IsNullOrEmpty(model.Password) && model.Password != "********")
                 {
                     existingClient.Password = model.Password;
@@ -99,17 +94,15 @@ namespace Fyp_Backend.Controllers
                 string imagePath = await SaveImage(model.PictureFile, model.Cnic);
                 if (imagePath == "Invalid") return BadRequest(new { message = "Invalid image." });
 
-                if (imagePath != null) 
+                if (imagePath != null)
                 {
                     model.Picture = imagePath;
                 }
                 model.AvailableStatus = true;
 
-                // 1. Insert Worker first to generate ID
+                // Note: Worker.CategoryId assignment has been removed here as it is handled via junction rows.
                 _context.Workers.Add(model);
                 await _context.SaveChangesAsync();
-
-                // 2. Insert Skills/Experiences linked to this Worker ID
                 if (!string.IsNullOrEmpty(experiencesJson))
                 {
                     var experiences = JsonConvert.DeserializeObject<List<Experience>>(experiencesJson);
@@ -118,8 +111,11 @@ namespace Fyp_Backend.Controllers
                         var uniqueJunctions = new HashSet<(int, int)>();
                         foreach (var exp in experiences)
                         {
+                            // CRITICAL FIX: Explicitly break object cycling loops
+                            exp.Worker = null;
                             exp.WorkerId = model.WorkerId;
-                            exp.ExperienceId = 0; // Ensure it is treated as new
+                            exp.ExperienceId = 0; // Ensures database handles assignment as a brand new row entry
+
                             _context.Experiences.Add(exp);
 
                             int catId = exp.CategoryId ?? 0;
@@ -146,7 +142,7 @@ namespace Fyp_Backend.Controllers
             catch (Exception ex)
             {
                 await transaction.RollbackAsync();
-                return StatusCode(500, new { message = ex.Message });
+                return StatusCode(500, new { message = ex.InnerException?.Message ?? ex.Message });
             }
         }
 
@@ -160,18 +156,16 @@ namespace Fyp_Backend.Controllers
                 if (existingWorker == null)
                     return NotFound(new { message = "Worker not found." });
 
-                // 1. Update Profile Picture if new one uploaded
                 if (model.PictureFile != null)
                 {
                     string identifier = model.Cnic ?? existingWorker.Cnic;
                     string imagePath = await SaveImage(model.PictureFile, identifier);
-                    if (imagePath != "Invalid" && imagePath != null) 
+                    if (imagePath != "Invalid" && imagePath != null)
                     {
                         existingWorker.Picture = imagePath;
                     }
                 }
 
-                // 2. Update Basic Fields
                 existingWorker.Name = model.Name;
                 existingWorker.Phone = model.Phone;
                 existingWorker.Address = model.Address;
@@ -179,18 +173,16 @@ namespace Fyp_Backend.Controllers
                 existingWorker.Salary = model.Salary;
                 existingWorker.Gender = model.Gender;
                 existingWorker.Bio = model.Bio;
-                existingWorker.CategoryId = model.CategoryId;
 
-                // 3. Update Password if provided and changed
+                // Note: CategoryId fields updates on the core model have been completely omitted here.
+
                 if (!string.IsNullOrEmpty(model.Password) && model.Password != "********")
                 {
                     existingWorker.Password = model.Password;
                 }
 
-                // 4. Update Skills/Experiences (Replace approach for simplicity and consistency)
                 if (!string.IsNullOrEmpty(experiencesJson))
                 {
-                    // Delete existing ones
                     var oldExps = await _context.Experiences.Where(e => e.WorkerId == model.WorkerId).ToListAsync();
                     _context.Experiences.RemoveRange(oldExps);
 
@@ -199,17 +191,15 @@ namespace Fyp_Backend.Controllers
 
                     await _context.SaveChangesAsync();
 
-                    // Insert fresh ones
                     var experiences = JsonConvert.DeserializeObject<List<Experience>>(experiencesJson);
                     if (experiences != null)
                     {
-                        // Deduplicate junctions to avoid tracking errors
                         var uniqueJunctions = new HashSet<(int, int)>();
 
                         foreach (var exp in experiences)
                         {
                             exp.WorkerId = model.WorkerId;
-                            exp.ExperienceId = 0; 
+                            exp.ExperienceId = 0;
                             _context.Experiences.Add(exp);
 
                             int catId = exp.CategoryId ?? 0;
@@ -240,26 +230,21 @@ namespace Fyp_Backend.Controllers
             }
         }
 
-        // Helper Method using your Naat logic ideas
         private async Task<string> SaveImage(IFormFile file, string identifier)
         {
             if (file == null || file.Length == 0) return null;
 
-            // 1. Validation Logic (from your Naat example)
             List<string> allowedExt = new List<string>() { ".jpg", ".jpeg", ".png" };
             var ext = Path.GetExtension(file.FileName).ToLower();
 
             if (!allowedExt.Contains(ext)) return "Invalid";
 
-            // 2. Path Logic - use "Images" (capital I) to match existing wwwroot/Images folder
             string folder = Path.Combine(_environment.WebRootPath, "Images");
             if (!Directory.Exists(folder)) Directory.CreateDirectory(folder);
 
-            // 3. Custom Naming (Identifier + Extension)
             string myfn = identifier + ext;
             string filePath = Path.Combine(folder, myfn);
 
-            // 4. Saving the stream
             using (var stream = new FileStream(filePath, FileMode.Create))
             {
                 await file.CopyToAsync(stream);
@@ -267,35 +252,35 @@ namespace Fyp_Backend.Controllers
 
             return "/Images/" + myfn;
         }
+
         [HttpGet("GetSkillsByCategory")]
-        public async Task<IActionResult> GetSkillsByCategory(int categoryId)
+        public async Task<IActionResult> GetSkillsByCategory([FromQuery] int categoryId)
         {
             try
             {
-                var skillsList = await _context.Skills
-                    .Where(s => s.CategoryId == categoryId && s.SkillName != null && s.SkillName != "")
+                // Fetches all sub-skills belonging to a specific primary category ID
+                var skills = await _context.Skills
+                    .Where(s => s.CategoryId == categoryId)
                     .Select(s => new
                     {
-                        id = s.SkillsId,
-                        name = s.SkillName
+                        SkillsId = s.SkillsId,
+                        SkillName = s.SkillName
                     })
                     .ToListAsync();
 
-                return Ok(skillsList);
+                return Ok(skills);
             }
             catch (Exception ex)
             {
-                // Log the inner exception if it exists for better debugging
-                var errorMsg = ex.InnerException != null ? ex.InnerException.Message : ex.Message;
-                return StatusCode(500, new { message = "Database Error: " + errorMsg });
+                return StatusCode(500, new { message = "Error fetching skills: " + (ex.InnerException?.Message ?? ex.Message) });
             }
         }
+
         [HttpPost("SubmitWorkerExperience")]
         public async Task<IActionResult> SubmitWorkerExperience([FromBody] Experience model)
         {
             try
             {
-                // Add the experience object directly to the context
                 _context.Experiences.Add(model);
                 await _context.SaveChangesAsync();
 
@@ -306,5 +291,28 @@ namespace Fyp_Backend.Controllers
                 return StatusCode(500, new { message = "Error: " + ex.Message });
             }
         }
+        [HttpGet("GetCategories")]
+        public async Task<IActionResult> GetCategories()
+        {
+            try
+            {
+                // Fetches all main categories (e.g., Cleaning, Cooking, Driving)
+                var categories = await _context.Categories
+                    .Select(c => new
+                    {
+                        // Safely map properties regardless of whether they are TitleCase or camelCase in DB
+                        CategoryId = c.CategoryId,
+                        CategoryName = c.CategoryName
+                    })
+                    .ToListAsync();
+
+                return Ok(categories);
+            }
+            catch (Exception ex)
+            {
+                return StatusCode(500, new { message = "Error fetching categories: " + (ex.InnerException?.Message ?? ex.Message) });
+            }
+        }
+
     }
 }

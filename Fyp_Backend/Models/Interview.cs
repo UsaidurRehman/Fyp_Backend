@@ -17,8 +17,6 @@ public partial class Interview
 
     public string? Status { get; set; }
 
-    public string? HiringDecision { get; set; }
-
     public string? WorkerDecision { get; set; }
 
     public virtual Client? Client { get; set; }
@@ -28,6 +26,7 @@ public partial class Interview
     public virtual ICollection<Review> Reviews { get; set; } = new List<Review>();
 
     public virtual ICollection<Termination> Terminations { get; set; } = new List<Termination>();
+    public virtual ICollection<Hiring> Hirings { get; set; } = new List<Hiring>();
 
     public virtual Worker? Worker { get; set; }
 }

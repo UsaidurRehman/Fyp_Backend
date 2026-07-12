@@ -24,6 +24,7 @@ public partial class Fyp1Context : DbContext
     public virtual DbSet<Skill> Skills { get; set; }
     public virtual DbSet<Termination> Terminations { get; set; }
     public virtual DbSet<Worker> Workers { get; set; }
+    public virtual DbSet<Hiring> Hiring { get; set; }
 
     // Updated naming to match standard conventions
     public virtual DbSet<WorkerCategory> WorkerCategories { get; set; }
@@ -91,7 +92,6 @@ public partial class Fyp1Context : DbContext
             entity.Property(e => e.InterviewId).HasColumnName("Interview_ID");
             entity.Property(e => e.Address).HasColumnType("text");
             entity.Property(e => e.ClientId).HasColumnName("Client_ID");
-            entity.Property(e => e.HiringDecision).HasMaxLength(50).IsUnicode(false).HasColumnName("Hiring_Decision");
             entity.Property(e => e.InterviewDate).HasColumnType("datetime").HasColumnName("Interview_Date");
             entity.Property(e => e.Status).HasMaxLength(50).IsUnicode(false);
             entity.Property(e => e.WorkerId).HasColumnName("Worker_ID");
@@ -166,7 +166,6 @@ public partial class Fyp1Context : DbContext
             entity.Property(e => e.WorkerId).HasColumnName("Worker_ID");
             entity.Property(e => e.Address).HasColumnType("text");
             entity.Property(e => e.AvailableStatus).HasDefaultValue(true).HasColumnName("Available_Status");
-            entity.Property(e => e.CategoryId).HasColumnName("Category_ID");
 
             entity.Property(e => e.Cnic).HasMaxLength(20).IsUnicode(false);
             entity.Property(e => e.Gender).HasMaxLength(10);
@@ -175,14 +174,44 @@ public partial class Fyp1Context : DbContext
             entity.Property(e => e.Phone).HasMaxLength(20).IsUnicode(false);
             entity.Property(e => e.Picture).HasMaxLength(255).IsUnicode(false);
             entity.Property(e => e.Salary).HasColumnType("decimal(10, 2)");
+        });
+        modelBuilder.Entity<Hiring>(entity =>
+        {
+            entity.ToTable("Hiring");
 
-            entity.HasOne(d => d.Category).WithMany(p => p.Workers)
-                .HasForeignKey(d => d.CategoryId)
-                .HasConstraintName("FK__Worker__Category__52593CB8");
+            entity.HasKey(e => e.HiringId);
+
+            entity.Property(e => e.HiringId)
+                .HasColumnName("Hiring_id");
+
+            entity.Property(e => e.InterviewId)
+                .HasColumnName("interview_id");
+
+            entity.Property(e => e.WorkerDecision)
+                .HasColumnName("WorkerDecision")
+                .HasMaxLength(50)
+                .IsUnicode(false); // Using IsUnicode(false) because VARCHAR(50) is non-Unicode
+
+            entity.Property(e => e.HiringDecision)
+                .HasColumnName("Hiring_Decision")
+                .HasMaxLength(50)
+                .IsUnicode(false);
+
+            entity.Property(e => e.Address)
+    .HasColumnName("Address")
+    .HasMaxLength(255)
+    .IsUnicode(false);
+
+            entity.Property(e => e.HiringDate)
+                .HasColumnName("Hiring_Date");
+
+            entity.HasOne(d => d.Interview)
+                .WithMany(p=>p.Hirings) // If Interview doesn't have a collection property like 'public virtual ICollection<Hiring> Hirings { get; set; }', leave this empty.
+                .HasForeignKey(d => d.InterviewId)
+                .HasConstraintName("FK__Hiring__intervie__xxxxxx"); // You can name this constraint or match the DB exact name
         });
 
         OnModelCreatingPartial(modelBuilder);
     }
-
     partial void OnModelCreatingPartial(ModelBuilder modelBuilder);
 }

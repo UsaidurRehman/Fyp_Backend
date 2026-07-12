@@ -10,6 +10,8 @@ public partial class Category
     public string CategoryName { get; set; } = null!;
 
     public virtual ICollection<Skill> Skills { get; set; } = new List<Skill>();
+    //  Keep this one
+    public virtual ICollection<WorkerCategory> WorkerCategories { get; set; } = new List<WorkerCategory>();
 
-    public virtual ICollection<Worker> Workers { get; set; } = new List<Worker>();
+    //public virtual ICollection<Worker> Workers { get; set; } = new List<Worker>();
 }
