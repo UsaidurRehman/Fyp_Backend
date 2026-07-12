@@ -106,11 +106,27 @@ namespace Fyp_Backend.Controllers
             {
                 IQueryable<Worker> query = _context.Workers;
 
-                // Filter by category names (Matches ANY of the selected categories)
+                // Filter by category names or IDs (Matches ANY of the selected categories)
                 if (categories != null && categories.Any() && !categories.Contains("All"))
                 {
+                    var normalizedCategories = categories
+                        .Where(c => !string.IsNullOrWhiteSpace(c))
+                        .Select(c => c.Trim())
+                        .ToList();
+
+                    var categoryIds = normalizedCategories
+                        .Where(c => int.TryParse(c, out _))
+                        .Select(int.Parse)
+                        .ToList();
+
+                    var categoryNames = normalizedCategories
+                        .Where(c => !int.TryParse(c, out _))
+                        .ToList();
+
                     query = query.Where(w => _context.WorkerCategories
-                        .Any(wc => wc.WorkerId == w.WorkerId && _context.Categories.Any(c => c.CategoryId == wc.CategoryId && categories.Contains(c.CategoryName))));
+                        .Any(wc => wc.WorkerId == w.WorkerId && _context.Categories
+                            .Any(c => c.CategoryId == wc.CategoryId &&
+                                (categoryIds.Contains(c.CategoryId) || categoryNames.Contains(c.CategoryName)))));
                 }
 
                 // Filter by gender if provided
@@ -459,11 +475,12 @@ namespace Fyp_Backend.Controllers
                 int pendingCount = await _context.Interviews
                     .CountAsync(i => i.ClientId == clientId && i.Status == "Pending");
 
-                // 2. FIXED: Count entries matching the completed hiring workflow milestones
+                // 2. Count only workers who are not fully terminated
                 int workersCount = await _context.Hiring
                     .CountAsync(h => h.Interview!.ClientId == clientId &&
                                      h.WorkerDecision == "Accepted" &&
-                                     h.HiringDecision == "Accepted");
+                                     h.HiringDecision == "Accepted" &&
+                                     h.Interview.Status != "Terminated");
 
                 // 3. Compile backend dashboard structured payload data
                 var workersList = await _context.Hiring
@@ -485,8 +502,12 @@ namespace Fyp_Backend.Controllers
                         location = h.Address ?? h.Interview.Address,
                         picture = h.Interview.Worker.Picture,
                         date = h.HiringDate != null ? h.HiringDate.Value.ToString("yyyy-MM-dd") : "",
-                        status = "On Work",
-                        type = "active"
+                        status = h.Interview!.Status == "Resigned" ? "Resigned"
+                                : h.Interview!.Status == "Terminated" ? "Terminated"
+                                : "On Work",
+                        type = h.Interview!.Status == "Resigned" ? "resigned"
+                             : h.Interview!.Status == "Terminated" ? "terminated"
+                             : "active"
                     })
                     .ToListAsync();
 
@@ -739,7 +760,7 @@ namespace Fyp_Backend.Controllers
                     else if (item.workerDecision == "Accepted")
                     {
                         type = "accepted";
-                        msg = "Offer Accepted! Waiting for client to confirm contract and finalize registration details.";
+                        msg = "Job offer accepted. Awaiting client response.";
                         displayStatus = "Accepted";
                     }
                     else
@@ -1146,7 +1167,6 @@ namespace Fyp_Backend.Controllers
                 double progress = 1.0 - ((double)remainingDays / totalNoticeDays);
                 if (progress > 1) progress = 1;
                 if (progress < 0) progress = 0;
-
                 return Ok(new
                 {
                     resignationId = resignation.ResignationId,
@@ -1158,7 +1178,9 @@ namespace Fyp_Backend.Controllers
                     lastWorkingDate = lastDayRaw.ToString("MMM dd, yyyy"),
                     totalNoticeDays = totalNoticeDays,
                     remainingDays = remainingDays,
-                    progress = Math.Round(progress, 2)
+                    progress = Math.Round(progress, 2),
+                    status = resignation.Interview?.Status ?? "Pending",
+                    isConfirmed = resignation.Interview?.Status == "Resigned"
                 });
             }
             catch (Exception ex)
@@ -1190,15 +1212,7 @@ namespace Fyp_Backend.Controllers
                 };
                 _context.Reviews.Add(review);
 
-                interview.Status = "Terminated";
-
-                var termination = new Termination
-                {
-                    InterviewId = interview.InterviewId,
-                    TerminatedDate = DateOnly.FromDateTime(DateTime.Now),
-                    TerminatedReason = "Resignation Confirmed" + (resignation != null ? ": " + resignation.ResignationReason : "")
-                };
-                _context.Terminations.Add(termination);
+                interview.Status = "Resigned";
 
                 await _context.SaveChangesAsync();
                 await transaction.CommitAsync();
@@ -1355,8 +1369,16 @@ namespace Fyp_Backend.Controllers
                     return NotFound(new { message = "Hiring context record trace entry missing." });
                 }
 
-                // Apply Rule 5 criteria context update
-                hiring.HiringDecision = model.HiringDecision; // Saves either "Accepted" or "Rejected"
+                // Apply Rule 5 criteria context update for client finalization only
+                hiring.HiringDecision = "Accepted";
+                hiring.HiringDate = DateTime.Now;
+
+                var interview = await _context.Interviews.FindAsync(hiring.InterviewId);
+                if (interview != null)
+                {
+                    interview.Status = "Finalized";
+                }
+
                 await _context.SaveChangesAsync();
 
                 return Ok(new { status = "Success", message = "Hiring handshake step state successfully mutated." });
