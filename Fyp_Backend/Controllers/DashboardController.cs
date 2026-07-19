@@ -502,10 +502,12 @@ namespace Fyp_Backend.Controllers
                         location = h.Address ?? h.Interview.Address,
                         picture = h.Interview.Worker.Picture,
                         date = h.HiringDate != null ? h.HiringDate.Value.ToString("yyyy-MM-dd") : "",
-                        status = h.Interview!.Status == "Resigned" ? "Resigned"
+                        status = h.Interview!.Status == "ResignationPending" ? "Pending Resignation"
+                                : h.Interview!.Status == "Resigned" ? "Resigned"
                                 : h.Interview!.Status == "Terminated" ? "Terminated"
                                 : "On Work",
-                        type = h.Interview!.Status == "Resigned" ? "resigned"
+                        type = h.Interview!.Status == "ResignationPending" ? "alert"
+                             : h.Interview!.Status == "Resigned" ? "resigned"
                              : h.Interview!.Status == "Terminated" ? "terminated"
                              : "active"
                     })
@@ -927,16 +929,34 @@ namespace Fyp_Backend.Controllers
         {
             try
             {
-                // Remove outdated HiringDecision filter validation checks
                 var activeInterview = await _context.Interviews
-                    .Where(i => i.WorkerId == workerId && i.Status == "Approved")
                     .Include(i => i.Client)
-                    .Select(i => new
+                    .Where(i => i.WorkerId == workerId &&
+                                i.WorkerDecision != "Rejected" &&
+                                i.Status != "Rejected" &&
+                                i.Status != "JobRejected" &&
+                                i.Status != "Completed" &&
+                                i.Status != "Terminated" &&
+                                i.Status != "Resigned")
+                    .GroupJoin(
+                        _context.Hiring.Where(h => h.HiringDecision == "Accepted"),
+                        i => i.InterviewId,
+                        h => h.InterviewId,
+                        (i, hiringGroup) => new { Interview = i, HasAcceptedHiring = hiringGroup.Any() }
+                    )
+                    .Where(x =>
+                        x.HasAcceptedHiring ||
+                        x.Interview.Status == "Approved" ||
+                        x.Interview.Status == "Finalized" ||
+                        x.Interview.Status == "Hired" ||
+                        x.Interview.Status == "Accepted")
+                    .OrderByDescending(x => x.Interview.InterviewId)
+                    .Select(x => new
                     {
-                        interviewId = i.InterviewId,
-                        employerName = i.Client != null ? i.Client.Name : "Unknown Employer",
-                        employerAddress = i.Client != null ? i.Client.Address : "N/A",
-                        hireDate = i.InterviewDate
+                        interviewId = x.Interview.InterviewId,
+                        employerName = x.Interview.Client != null ? x.Interview.Client.Name : "Unknown Employer",
+                        employerAddress = x.Interview.Client != null ? x.Interview.Client.Address : "N/A",
+                        hireDate = x.Interview.InterviewDate
                     })
                     .FirstOrDefaultAsync();
 
@@ -1062,8 +1082,8 @@ namespace Fyp_Backend.Controllers
                 };
                 _context.Resignations.Add(resignation);
 
-                // 2. Mark interview as Resigned so GetWorkerEndContractDetails can find it
-                interview.Status = "Resigned";
+                // 2. Keep the resignation in a pending state until the client confirms it
+                interview.Status = "ResignationPending";
 
                 // 3. Free up the worker so they appear in search results again
                 if (interview.Worker != null)
@@ -1167,6 +1187,10 @@ namespace Fyp_Backend.Controllers
                 double progress = 1.0 - ((double)remainingDays / totalNoticeDays);
                 if (progress > 1) progress = 1;
                 if (progress < 0) progress = 0;
+
+                bool hasClientReview = await _context.Reviews.AnyAsync(r => r.InterviewId == resignation.InterviewId);
+                bool isConfirmed = resignation.Interview?.Status == "Resigned" || hasClientReview;
+
                 return Ok(new
                 {
                     resignationId = resignation.ResignationId,
@@ -1180,7 +1204,7 @@ namespace Fyp_Backend.Controllers
                     remainingDays = remainingDays,
                     progress = Math.Round(progress, 2),
                     status = resignation.Interview?.Status ?? "Pending",
-                    isConfirmed = resignation.Interview?.Status == "Resigned"
+                    isConfirmed = isConfirmed
                 });
             }
             catch (Exception ex)
@@ -1202,6 +1226,9 @@ namespace Fyp_Backend.Controllers
                     .Where(r => r.InterviewId == model.InterviewId)
                     .OrderByDescending(r => r.SubmittedDate)
                     .FirstOrDefaultAsync();
+
+                if (interview.Status == "Resigned")
+                    return BadRequest(new { message = "This resignation has already been confirmed." });
 
                 var review = new Review
                 {
