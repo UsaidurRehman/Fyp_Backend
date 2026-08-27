@@ -26,6 +26,12 @@ public partial class Fyp1Context : DbContext
     public virtual DbSet<Worker> Workers { get; set; }
     public virtual DbSet<Hiring> Hiring { get; set; }
 
+    // NEW DBSETS
+    public virtual DbSet<Company> Companies { get; set; }
+    public virtual DbSet<PoliceOfficer> PoliceOfficers { get; set; }
+    public virtual DbSet<WorkerCertification> WorkerCertifications { get; set; }
+    public virtual DbSet<PoliceRecord> PoliceRecords { get; set; }
+
     // Updated naming to match standard conventions
     public virtual DbSet<WorkerCategory> WorkerCategories { get; set; }
 
@@ -53,7 +59,6 @@ public partial class Fyp1Context : DbContext
             entity.Property(e => e.WorkerId).HasColumnName("Worker_ID");
             entity.Property(e => e.CategoryId).HasColumnName("Category_ID");
             entity.Property(e => e.SkillsId).HasColumnName("Skills_ID");
-
         });
 
         modelBuilder.Entity<Client>(entity =>
@@ -68,6 +73,8 @@ public partial class Fyp1Context : DbContext
             entity.Property(e => e.Password).HasMaxLength(255).IsUnicode(false);
             entity.Property(e => e.Phone).HasMaxLength(20).IsUnicode(false);
             entity.Property(e => e.Picture).HasMaxLength(255).IsUnicode(false);
+            entity.Property(e => e.Latitude).HasColumnName("Latitude");
+            entity.Property(e => e.Longitude).HasColumnName("Longitude");
         });
 
         modelBuilder.Entity<Experience>(entity =>
@@ -127,7 +134,7 @@ public partial class Fyp1Context : DbContext
             entity.Property(e => e.ResignationReason).HasColumnName("Resignation_Reason").HasColumnType("text");
             entity.Property(e => e.LastWorkingDate).HasColumnName("Last_Working_Date").HasColumnType("date");
             entity.Property(e => e.SubmittedDate).HasColumnName("Submitted_Date").HasColumnType("datetime");
-            
+
             entity.HasOne(d => d.Interview).WithMany(p => p.Resignations)
                 .HasForeignKey(d => d.InterviewId);
         });
@@ -175,6 +182,7 @@ public partial class Fyp1Context : DbContext
             entity.Property(e => e.Picture).HasMaxLength(255).IsUnicode(false);
             entity.Property(e => e.Salary).HasColumnType("decimal(10, 2)");
         });
+
         modelBuilder.Entity<Hiring>(entity =>
         {
             entity.ToTable("Hiring");
@@ -190,7 +198,7 @@ public partial class Fyp1Context : DbContext
             entity.Property(e => e.WorkerDecision)
                 .HasColumnName("WorkerDecision")
                 .HasMaxLength(50)
-                .IsUnicode(false); // Using IsUnicode(false) because VARCHAR(50) is non-Unicode
+                .IsUnicode(false);
 
             entity.Property(e => e.HiringDecision)
                 .HasColumnName("Hiring_Decision")
@@ -198,20 +206,95 @@ public partial class Fyp1Context : DbContext
                 .IsUnicode(false);
 
             entity.Property(e => e.Address)
-    .HasColumnName("Address")
-    .HasMaxLength(255)
-    .IsUnicode(false);
+                .HasColumnName("Address")
+                .HasMaxLength(255)
+                .IsUnicode(false);
 
             entity.Property(e => e.HiringDate)
                 .HasColumnName("Hiring_Date");
 
             entity.HasOne(d => d.Interview)
-                .WithMany(p=>p.Hirings) // If Interview doesn't have a collection property like 'public virtual ICollection<Hiring> Hirings { get; set; }', leave this empty.
+                .WithMany(p => p.Hirings)
                 .HasForeignKey(d => d.InterviewId)
-                .HasConstraintName("FK__Hiring__intervie__xxxxxx"); // You can name this constraint or match the DB exact name
+                .HasConstraintName("FK__Hiring__intervie__xxxxxx");
+        });
+
+        modelBuilder.Entity<Company>(entity =>
+        {
+            entity.ToTable("Companies");
+            entity.HasKey(e => e.CompanyID);
+
+            entity.Property(e => e.CompanyName).HasMaxLength(150);
+            entity.Property(e => e.Email).HasMaxLength(100);
+            entity.Property(e => e.Password).HasMaxLength(255);
+            entity.Property(e => e.PhoneNo).HasMaxLength(20);
+            entity.Property(e => e.LicenseNumber).HasMaxLength(50);
+            entity.Property(e => e.CompanyAddress).HasMaxLength(255);
+            entity.Property(e => e.CreatedAt).HasDefaultValueSql("(getdate())");
+            entity.Property(e => e.CompanyPicture)
+                .HasMaxLength(255)
+                .HasDefaultValue("company_default.jpg");
+        });
+
+        modelBuilder.Entity<PoliceOfficer>(entity =>
+        {
+            entity.ToTable("PoliceOfficers");
+            entity.HasKey(e => e.PoliceID);
+
+            entity.Property(e => e.StationName).HasMaxLength(150);
+            entity.Property(e => e.BadgeID).HasMaxLength(50);
+            entity.Property(e => e.Email).HasMaxLength(100);
+            entity.Property(e => e.Password).HasMaxLength(255);
+            entity.Property(e => e.PhoneNo).HasMaxLength(20);
+            entity.Property(e => e.JurisdictionAddress).HasMaxLength(255);
+            entity.Property(e => e.CreatedAt).HasDefaultValueSql("(getdate())");
+        });
+
+        modelBuilder.Entity<WorkerCertification>(entity =>
+        {
+            entity.ToTable("WorkerCertifications");
+            entity.HasKey(e => e.CertificationID);
+
+            entity.Property(e => e.WorkerID).HasColumnName("WorkerID");
+            entity.Property(e => e.CompanyID).HasColumnName("CompanyID");
+            entity.Property(e => e.CertificateTitle).HasMaxLength(150);
+            entity.Property(e => e.TrainingEvaluationNotes).HasColumnType("nvarchar(max)");
+            entity.Property(e => e.IssuedDate).HasDefaultValueSql("(getdate())");
+
+            entity.HasOne(d => d.Company)
+                .WithMany()
+                .HasForeignKey(d => d.CompanyID);
+
+            entity.HasOne(d => d.Worker)
+                .WithMany()
+                .HasForeignKey(d => d.WorkerID);
+        });
+
+        modelBuilder.Entity<PoliceRecord>(entity =>
+        {
+            entity.ToTable("PoliceRecords");
+            entity.HasKey(e => e.RecordID);
+
+            entity.Property(e => e.WorkerID).HasColumnName("WorkerID");
+            entity.Property(e => e.PoliceID).HasColumnName("PoliceID");
+            entity.Property(e => e.FIRNumber).HasMaxLength(50);
+            entity.Property(e => e.OffenseCategory).HasMaxLength(100);
+            entity.Property(e => e.CaseDetails).HasColumnType("nvarchar(max)");
+            entity.Property(e => e.IsFlagged).HasDefaultValue(true);
+            entity.Property(e => e.IsBlocked).HasDefaultValue(false);
+            entity.Property(e => e.FiledDate).HasDefaultValueSql("(getdate())");
+
+            entity.HasOne(d => d.PoliceOfficer)
+                .WithMany()
+                .HasForeignKey(d => d.PoliceID);
+
+            entity.HasOne(d => d.Worker)
+                .WithMany()
+                .HasForeignKey(d => d.WorkerID);
         });
 
         OnModelCreatingPartial(modelBuilder);
     }
+
     partial void OnModelCreatingPartial(ModelBuilder modelBuilder);
 }

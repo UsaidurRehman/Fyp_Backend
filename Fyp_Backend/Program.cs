@@ -7,6 +7,7 @@ using Scalar.AspNetCore;
 
 var builder = WebApplication.CreateBuilder(args);
 
+
 builder.Services.AddControllers()
     .AddJsonOptions(options =>
     {
@@ -61,6 +62,7 @@ if (app.Environment.IsDevelopment())
     app.MapOpenApi();      // Map the .NET 9 OpenAPI endpoint
     app.UseSwagger();      // Generates the swagger.json
     app.UseSwaggerUI();    // Enables the visual UI at /swagger
+
 }
 
 app.UseStaticFiles(); // Serves files from wwwroot (e.g. /images/photo.jpg)
@@ -68,6 +70,7 @@ app.UseStaticFiles(); // Serves files from wwwroot (e.g. /images/photo.jpg)
 // DO NOT USE HTTPS REDIRECTION FOR LOCAL MOBILE DEVELOPMENT
 // app.UseHttpsRedirection();
 
+app.UseStaticFiles();
 app.UseCors("AllowAll");
 app.UseCors("AllowNextJs");
 

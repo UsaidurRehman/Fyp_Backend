@@ -23,8 +23,8 @@ namespace Fyp_Backend.Controllers
 
         public class LoginDto
         {
-            public string Role { get; set; } = string.Empty;        // "Client" or "Worker"
-            public string EmailOrCnic { get; set; } = string.Empty; // Email for Client, CNIC for Worker
+            public string Role { get; set; } = string.Empty;        // "Client", "Worker", "Company", or "Police"
+            public string EmailOrCnic { get; set; } = string.Empty; // Holds Email, CNIC, LicenseNumber, or BadgeID
             public string Password { get; set; } = string.Empty;
         }
 
@@ -36,7 +36,6 @@ namespace Fyp_Backend.Controllers
                 if (model.Role == "Client")
                 {
                     var client = await _context.Clients.FirstOrDefaultAsync(c => c.Email == model.EmailOrCnic);
-
                     bool isClientPasswordValid = client != null && client.Password == model.Password;
 
                     if (client == null || !isClientPasswordValid)
@@ -45,7 +44,8 @@ namespace Fyp_Backend.Controllers
                     }
 
                     var token = GenerateJwtToken(client.ClientId.ToString(), "Client", client.Name);
-                    return Ok(new {
+                    return Ok(new
+                    {
                         token,
                         role = "Client",
                         clientId = client.ClientId,
@@ -54,6 +54,8 @@ namespace Fyp_Backend.Controllers
                         picture = client.Picture,
                         address = client.Address,
                         phone = client.Phone,
+                        latitude = client.Latitude,
+                        longitude = client.Longitude,
                         message = "Login successful"
                     });
                 }
@@ -68,11 +70,62 @@ namespace Fyp_Backend.Controllers
                     }
 
                     var token = GenerateJwtToken(worker.WorkerId.ToString(), "Worker", worker.Name);
-                    return Ok(new { 
-                        token, 
-                        role = "Worker", 
-                        workerId = worker.WorkerId, // Explicitly return ID for frontend use
-                        message = "Login successful" 
+                    return Ok(new
+                    {
+                        token,
+                        role = "Worker",
+                        workerId = worker.WorkerId,
+                        name = worker.Name,
+                        picture = worker.Picture,
+                        message = "Login successful"
+                    });
+                }
+                else if (model.Role == "Company")
+                {
+                    var company = await _context.Companies.FirstOrDefaultAsync(c => c.LicenseNumber == model.EmailOrCnic);
+                    bool isPasswordValid = company != null && company.Password == model.Password;
+
+                    if (company == null || !isPasswordValid)
+                    {
+                        return Unauthorized(new { message = "Invalid credentials." });
+                    }
+
+                    var token = GenerateJwtToken(company.CompanyID.ToString(), "Company", company.CompanyName);
+                    return Ok(new
+                    {
+                        token,
+                        role = "Company",
+                        companyId = company.CompanyID,
+                        name = company.CompanyName,
+                        email = company.Email,
+                        phone = company.PhoneNo,
+                        address = company.CompanyAddress,
+                        licenseNumber = company.LicenseNumber,
+                        message = "Login successful"
+                    });
+                }
+                else if (model.Role == "Police")
+                {
+                    var police = await _context.PoliceOfficers.FirstOrDefaultAsync(p => p.BadgeID == model.EmailOrCnic);
+                    bool isPasswordValid = police != null && police.Password == model.Password;
+
+                    if (police == null || !isPasswordValid)
+                    {
+                        return Unauthorized(new { message = "Invalid credentials." });
+                    }
+
+                    var token = GenerateJwtToken(police.PoliceID.ToString(), "Police", police.StationName);
+                    return Ok(new
+                    {
+                        token,
+                        role = "Police",
+                        policeId = police.PoliceID,
+                        stationName = police.StationName,
+                        badgeId = police.BadgeID,
+                        email = police.Email,
+                        phone = police.PhoneNo,
+                        address = police.JurisdictionAddress,
+                        message = "Login successful"
                     });
                 }
 
@@ -80,7 +133,6 @@ namespace Fyp_Backend.Controllers
             }
             catch (Exception ex)
             {
-                // Return the actual error for easier debugging
                 return StatusCode(500, new { message = "Error: " + (ex.InnerException?.Message ?? ex.Message) });
             }
         }

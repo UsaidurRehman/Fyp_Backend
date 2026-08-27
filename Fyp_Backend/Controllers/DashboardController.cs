@@ -94,13 +94,124 @@ namespace Fyp_Backend.Controllers
             }
         }
 
+        //[HttpGet("GetWorkersForClient")]
+        //public async Task<IActionResult> GetWorkersForClient(
+        //    [FromQuery] List<string>? categories = null,
+        //    [FromQuery] string? search = null,
+        //    [FromQuery] string? gender = null,
+        //    [FromQuery] string? city = null,
+        //    [FromQuery] List<string>? subSkills = null)
+        //{
+        //    try
+        //    {
+        //        IQueryable<Worker> query = _context.Workers;
+
+        //        // Filter by category names or IDs (Matches ANY of the selected categories)
+        //        if (categories != null && categories.Any() && !categories.Contains("All"))
+        //        {
+        //            var normalizedCategories = categories
+        //                .Where(c => !string.IsNullOrWhiteSpace(c))
+        //                .Select(c => c.Trim())
+        //                .ToList();
+
+        //            var categoryIds = normalizedCategories
+        //                .Where(c => int.TryParse(c, out _))
+        //                .Select(int.Parse)
+        //                .ToList();
+
+        //            var categoryNames = normalizedCategories
+        //                .Where(c => !int.TryParse(c, out _))
+        //                .ToList();
+
+        //            query = query.Where(w => _context.WorkerCategories
+        //                .Any(wc => wc.WorkerId == w.WorkerId && _context.Categories
+        //                    .Any(c => c.CategoryId == wc.CategoryId &&
+        //                        (categoryIds.Contains(c.CategoryId) || categoryNames.Contains(c.CategoryName)))));
+        //        }
+
+        //        // Filter by gender if provided
+        //        if (!string.IsNullOrEmpty(gender) && gender != "Both")
+        //        {
+        //            query = query.Where(w => w.Gender == gender);
+        //        }
+
+        //        // Filter by city if provided
+        //        if (!string.IsNullOrEmpty(city))
+        //        {
+        //            query = query.Where(w => w.Address != null && w.Address.Contains(city));
+        //        }
+
+        //        // Filter by name if search is provided
+        //        if (!string.IsNullOrEmpty(search))
+        //        {
+        //            query = query.Where(w => w.Name.Contains(search));
+        //        }
+
+        //        // AND logic for sub-skills (Worker must possess ALL selected sub-skills)
+        //        if (subSkills != null && subSkills.Any())
+        //        {
+        //            foreach (var skillName in subSkills)
+        //            {
+        //                query = query.Where(w => _context.WorkerCategories
+        //                    .Any(wc => wc.WorkerId == w.WorkerId && _context.Skills.Any(s => s.SkillsId == wc.SkillsId && s.SkillName == skillName)));
+        //            }
+        //        }
+
+        //        // Materialize the workers with rating and sub-skills
+        //        var workerList = await query.ToListAsync();
+        //        var results = new List<object>();
+
+        //        foreach (var w in workerList)
+        //        {
+        //            // Calculate Average Rating
+        //            var ratings = await _context.Reviews
+        //                .Where(r => r.Interview != null && r.Interview.WorkerId == w.WorkerId)
+        //                .Select(r => r.Rating)
+        //                .ToListAsync();
+
+        //            double avgRating = ratings.Any() ? Math.Round(ratings.Average(r => (double)r!), 1) : 0.0;
+
+        //            // Get All Category Names (Main Categories)
+        //            var categoryNames = await _context.WorkerCategories
+        //                .Where(wc => wc.WorkerId == w.WorkerId)
+        //                .Join(_context.Categories,
+        //                      wc => wc.CategoryId,
+        //                      c => c.CategoryId,
+        //                      (wc, c) => c.CategoryName)
+        //                .Where(name => !string.IsNullOrEmpty(name))
+        //                .Distinct()
+        //                .ToListAsync();
+
+        //            results.Add(new
+        //            {
+        //                id = w.WorkerId.ToString(),
+        //                name = w.Name,
+        //                role = categoryNames.FirstOrDefault() ?? "General",
+        //                city = w.Address ?? "N/A",
+        //                salary = w.Salary != null ? "Rs." + w.Salary.ToString() : "Not Set",
+        //                phone = w.Phone,
+        //                picture = w.Picture,
+        //                rating = avgRating.ToString("F1"),
+        //                gender = w.Gender ?? "N/A",
+        //                categories = categoryNames,
+        //                availableStatus = w.AvailableStatus ?? false,
+        //            });
+        //        }
+
+        //        return Ok(results);
+        //    }
+        //    catch (Exception ex)
+        //    {
+        //        return StatusCode(500, new { message = "Error: " + ex.Message });
+        //    }
+        //}
         [HttpGet("GetWorkersForClient")]
         public async Task<IActionResult> GetWorkersForClient(
-            [FromQuery] List<string>? categories = null,
-            [FromQuery] string? search = null,
-            [FromQuery] string? gender = null,
-            [FromQuery] string? city = null,
-            [FromQuery] List<string>? subSkills = null)
+    [FromQuery] List<string>? categories = null,
+    [FromQuery] string? search = null,
+    [FromQuery] string? gender = null,
+    [FromQuery] string? city = null,
+    [FromQuery] List<string>? subSkills = null)
         {
             try
             {
@@ -144,7 +255,7 @@ namespace Fyp_Backend.Controllers
                 // Filter by name if search is provided
                 if (!string.IsNullOrEmpty(search))
                 {
-                    query = query.Where(w => w.Name.Contains(search));
+                    query = query.Where(w => w.Name != null && w.Name.Contains(search));
                 }
 
                 // AND logic for sub-skills (Worker must possess ALL selected sub-skills)
@@ -172,7 +283,7 @@ namespace Fyp_Backend.Controllers
                     double avgRating = ratings.Any() ? Math.Round(ratings.Average(r => (double)r!), 1) : 0.0;
 
                     // Get All Category Names (Main Categories)
-                    var categoryNames = await _context.WorkerCategories
+                    var workerCategoryNames = await _context.WorkerCategories
                         .Where(wc => wc.WorkerId == w.WorkerId)
                         .Join(_context.Categories,
                               wc => wc.CategoryId,
@@ -182,19 +293,28 @@ namespace Fyp_Backend.Controllers
                         .Distinct()
                         .ToListAsync();
 
+                    // Check Police Records Status
+                    bool isFlagged = await _context.PoliceRecords
+                        .AnyAsync(pr => pr.WorkerID == w.WorkerId && pr.IsFlagged == true);
+
+                    bool isBlocked = await _context.PoliceRecords
+                        .AnyAsync(pr => pr.WorkerID == w.WorkerId && pr.IsBlocked == true);
+
                     results.Add(new
                     {
                         id = w.WorkerId.ToString(),
                         name = w.Name,
-                        role = categoryNames.FirstOrDefault() ?? "General",
+                        role = workerCategoryNames.FirstOrDefault() ?? "General",
                         city = w.Address ?? "N/A",
                         salary = w.Salary != null ? "Rs." + w.Salary.ToString() : "Not Set",
                         phone = w.Phone,
                         picture = w.Picture,
                         rating = avgRating.ToString("F1"),
                         gender = w.Gender ?? "N/A",
-                        categories = categoryNames,
+                        categories = workerCategoryNames,
                         availableStatus = w.AvailableStatus ?? false,
+                        isFlagged = isFlagged,
+                        isBlocked = isBlocked
                     });
                 }
 
@@ -1415,8 +1535,46 @@ namespace Fyp_Backend.Controllers
                 return StatusCode(500, new { message = "Internal transaction failure: " + ex.Message });
             }
         }
+        [HttpPost("update-location")]
+        public async Task<IActionResult> UpdateClientLocation([FromBody] ClientLocationDTO dto)
+        {
+            try
+            {
+                if (dto == null || dto.Latitude == 0 || dto.Longitude == 0)
+                    return BadRequest(new { message = "Invalid latitude or longitude." });
 
-        public class HiringUpdateDto
+                var client = await _context.Clients.FirstOrDefaultAsync(c => c.ClientId == dto.ClientId);
+                if (client == null)
+                    return NotFound(new { message = "Client not found." });
+
+                // Save coordinates directly
+                client.Latitude = dto.Latitude;
+                client.Longitude = dto.Longitude;
+
+                await _context.SaveChangesAsync();
+
+                return Ok(new
+                {
+                    message = "Location updated successfully",
+                    latitude = client.Latitude,
+                    longitude = client.Longitude
+                });
+            }
+            catch (Exception ex)
+            {
+                return StatusCode(500, new { message = "Internal server error", error = ex.Message });
+            }
+        }
+
+    // DTO Class
+    public class ClientLocationDTO
+    {
+        public int ClientId { get; set; }
+        public double Latitude { get; set; }
+        public double Longitude { get; set; }
+    }
+
+    public class HiringUpdateDto
         {
             public int HiringId { get; set; }
             public string HiringDecision { get; set; } = null!;

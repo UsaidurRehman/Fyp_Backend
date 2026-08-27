@@ -100,9 +100,9 @@ namespace Fyp_Backend.Controllers
                 }
                 model.AvailableStatus = true;
 
-                // Note: Worker.CategoryId assignment has been removed here as it is handled via junction rows.
                 _context.Workers.Add(model);
                 await _context.SaveChangesAsync();
+
                 if (!string.IsNullOrEmpty(experiencesJson))
                 {
                     var experiences = JsonConvert.DeserializeObject<List<Experience>>(experiencesJson);
@@ -111,10 +111,9 @@ namespace Fyp_Backend.Controllers
                         var uniqueJunctions = new HashSet<(int, int)>();
                         foreach (var exp in experiences)
                         {
-                            // CRITICAL FIX: Explicitly break object cycling loops
                             exp.Worker = null;
                             exp.WorkerId = model.WorkerId;
-                            exp.ExperienceId = 0; // Ensures database handles assignment as a brand new row entry
+                            exp.ExperienceId = 0;
 
                             _context.Experiences.Add(exp);
 
@@ -174,8 +173,6 @@ namespace Fyp_Backend.Controllers
                 existingWorker.Gender = model.Gender;
                 existingWorker.Bio = model.Bio;
 
-                // Note: CategoryId fields updates on the core model have been completely omitted here.
-
                 if (!string.IsNullOrEmpty(model.Password) && model.Password != "********")
                 {
                     existingWorker.Password = model.Password;
@@ -230,6 +227,135 @@ namespace Fyp_Backend.Controllers
             }
         }
 
+        [HttpPost("SignupCompany")]
+        public async Task<IActionResult> SignupCompany([FromForm] Company model, [FromForm] IFormFile? LogoFile)
+        {
+            try
+            {
+                if (await _context.Companies.AnyAsync(c => c.Email == model.Email))
+                    return BadRequest(new { message = "Email is already registered." });
+
+                if (await _context.Companies.AnyAsync(c => c.LicenseNumber == model.LicenseNumber))
+                    return BadRequest(new { message = "License/Registration number is already registered." });
+
+                string safeFileName = "company_" + model.Email.Replace("@", "_").Replace(".", "_");
+                string imagePath = await SaveImage(LogoFile, safeFileName);
+
+                if (imagePath == "Invalid")
+                    return BadRequest(new { message = "Only .jpg, .jpeg, and .png files are allowed." });
+
+                if (imagePath != null)
+                {
+                    model.CompanyPicture = imagePath;
+                }
+
+                model.CreatedAt = DateTime.Now;
+                _context.Companies.Add(model);
+                await _context.SaveChangesAsync();
+
+                return Ok(new { status = "Success", message = "Company registered successfully!" });
+            }
+            catch (Exception ex)
+            {
+                return StatusCode(500, new { message = "Error: " + (ex.InnerException?.Message ?? ex.Message) });
+            }
+        }
+
+        [HttpPost("UpdateCompany")]
+        public async Task<IActionResult> UpdateCompany([FromForm] Company model, [FromForm] IFormFile? LogoFile)
+        {
+            try
+            {
+                var existingCompany = await _context.Companies.FindAsync(model.CompanyID);
+                if (existingCompany == null)
+                    return NotFound(new { message = "Company profile not found." });
+
+                if (LogoFile != null)
+                {
+                    string safeFileName = "company_" + model.Email.Replace("@", "_").Replace(".", "_");
+                    string imagePath = await SaveImage(LogoFile, safeFileName);
+                    if (imagePath != "Invalid" && imagePath != null)
+                    {
+                        existingCompany.CompanyPicture = imagePath;
+                    }
+                }
+
+                existingCompany.CompanyName = model.CompanyName;
+                existingCompany.PhoneNo = model.PhoneNo;
+                existingCompany.CompanyAddress = model.CompanyAddress;
+                existingCompany.LicenseNumber = model.LicenseNumber;
+                existingCompany.Email = model.Email;
+
+                if (!string.IsNullOrEmpty(model.Password) && model.Password != "********")
+                {
+                    existingCompany.Password = model.Password;
+                }
+
+                await _context.SaveChangesAsync();
+                return Ok(new { status = "Success", message = "Company profile updated successfully!" });
+            }
+            catch (Exception ex)
+            {
+                return StatusCode(500, new { message = "Update failed: " + (ex.InnerException?.Message ?? ex.Message) });
+            }
+        }
+
+        // ==========================================
+        // NEW: POLICE OFFICER SIGNUP & UPDATE ENDPOINTS
+        // ==========================================
+
+        [HttpPost("SignupPolice")]
+        public async Task<IActionResult> SignupPolice([FromForm] PoliceOfficer model)
+        {
+            try
+            {
+                if (await _context.PoliceOfficers.AnyAsync(p => p.Email == model.Email))
+                    return BadRequest(new { message = "Official Email is already registered." });
+
+                if (await _context.PoliceOfficers.AnyAsync(p => p.BadgeID == model.BadgeID))
+                    return BadRequest(new { message = "Badge / Service ID is already registered." });
+
+                model.CreatedAt = DateTime.Now;
+                _context.PoliceOfficers.Add(model);
+                await _context.SaveChangesAsync();
+
+                return Ok(new { status = "Success", message = "Police Officer account registered successfully!" });
+            }
+            catch (Exception ex)
+            {
+                return StatusCode(500, new { message = "Error: " + (ex.InnerException?.Message ?? ex.Message) });
+            }
+        }
+
+        [HttpPost("UpdatePolice")]
+        public async Task<IActionResult> UpdatePolice([FromForm] PoliceOfficer model)
+        {
+            try
+            {
+                var existingOfficer = await _context.PoliceOfficers.FindAsync(model.PoliceID);
+                if (existingOfficer == null)
+                    return NotFound(new { message = "Police officer account not found." });
+
+                existingOfficer.StationName = model.StationName;
+                existingOfficer.BadgeID = model.BadgeID;
+                existingOfficer.Email = model.Email;
+                existingOfficer.PhoneNo = model.PhoneNo;
+                existingOfficer.JurisdictionAddress = model.JurisdictionAddress;
+
+                if (!string.IsNullOrEmpty(model.Password) && model.Password != "********")
+                {
+                    existingOfficer.Password = model.Password;
+                }
+
+                await _context.SaveChangesAsync();
+                return Ok(new { status = "Success", message = "Police account updated successfully!" });
+            }
+            catch (Exception ex)
+            {
+                return StatusCode(500, new { message = "Update failed: " + (ex.InnerException?.Message ?? ex.Message) });
+            }
+        }
+
         private async Task<string> SaveImage(IFormFile file, string identifier)
         {
             if (file == null || file.Length == 0) return null;
@@ -258,7 +384,6 @@ namespace Fyp_Backend.Controllers
         {
             try
             {
-                // Fetches all sub-skills belonging to a specific primary category ID
                 var skills = await _context.Skills
                     .Where(s => s.CategoryId == categoryId)
                     .Select(s => new
@@ -291,16 +416,15 @@ namespace Fyp_Backend.Controllers
                 return StatusCode(500, new { message = "Error: " + ex.Message });
             }
         }
+
         [HttpGet("GetCategories")]
         public async Task<IActionResult> GetCategories()
         {
             try
             {
-                // Fetches all main categories (e.g., Cleaning, Cooking, Driving)
                 var categories = await _context.Categories
                     .Select(c => new
                     {
-                        // Safely map properties regardless of whether they are TitleCase or camelCase in DB
                         CategoryId = c.CategoryId,
                         CategoryName = c.CategoryName
                     })
@@ -313,6 +437,5 @@ namespace Fyp_Backend.Controllers
                 return StatusCode(500, new { message = "Error fetching categories: " + (ex.InnerException?.Message ?? ex.Message) });
             }
         }
-
     }
 }
