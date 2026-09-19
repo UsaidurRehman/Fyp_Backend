@@ -325,9 +325,8 @@ namespace Fyp_Backend.Controllers
                 return StatusCode(500, new { message = "Error: " + ex.Message });
             }
         }
-
         [HttpGet("GetWorkerDetail/{id}")]
-        public async Task<IActionResult> GetWorkerDetail(int id)
+        public async Task<IActionResult> GetWorkerDetail(int id, [FromQuery] int? clientIdParam = null)
         {
             try
             {
@@ -342,14 +341,28 @@ namespace Fyp_Backend.Controllers
                 if (worker == null)
                     return NotFound(new { message = "Worker not found" });
 
+                // Extract Client ID from Claims or Query Parameter
                 var userIdStr = User.FindFirst(ClaimTypes.NameIdentifier)?.Value
                              ?? User.FindFirst(System.IdentityModel.Tokens.Jwt.JwtRegisteredClaimNames.Sub)?.Value;
+
+                int clientId = 0;
+                if (!string.IsNullOrEmpty(userIdStr))
+                {
+                    int.TryParse(userIdStr, out clientId);
+                }
+                if (clientId == 0 && clientIdParam.HasValue)
+                {
+                    clientId = clientIdParam.Value;
+                }
+
                 bool hasActiveInterview = false;
                 string activeInterviewStatus = null;
-                if (!string.IsNullOrEmpty(userIdStr) && int.TryParse(userIdStr, out int clientId))
+                var client = await _context.Clients.FirstOrDefaultAsync(c => c.ClientId == clientId);
+
+                if (client != null)
                 {
                     var activeInt = worker.Interviews.FirstOrDefault(i =>
-                        i.ClientId == clientId &&
+                        i.ClientId == client.ClientId &&
                         i.WorkerDecision != "Rejected" &&
                         i.Status != "Rejected" &&
                         i.Status != "Completed" &&
@@ -359,15 +372,58 @@ namespace Fyp_Backend.Controllers
                     activeInterviewStatus = activeInt?.Status;
                 }
 
-                // Flatten Reviews and calculate rating
-                var allReviews = worker.Interviews
-                    .SelectMany(i => i.Reviews.Select(r => new
+                // --- HAVERSINE RADIUS DISTANCE CALCULATION ---
+                bool isWithinRadius = false;
+                double distanceKm = 0;
+
+                if (client != null &&
+                    worker.Latitude.HasValue && worker.Longitude.HasValue &&
+                    client.Latitude.HasValue && client.Longitude.HasValue)
+                {
+                    double workerLat = Convert.ToDouble(worker.Latitude.Value);
+                    double workerLng = Convert.ToDouble(worker.Longitude.Value);
+                    double clientLat = Convert.ToDouble(client.Latitude.Value);
+                    double clientLng = Convert.ToDouble(client.Longitude.Value);
+
+                    distanceKm = CalculateHaversineDistance(clientLat, clientLng, workerLat, workerLng);
+
+                    // Fetch radius from worker (Default to 5 km if null or zero)
+                    double workerRadius = worker.Radius > 0 ? worker.Radius : 5.0;
+
+                    if (distanceKm <= workerRadius)
                     {
-                        reviewerName = i.Client?.Name ?? "Anonymous",
-                        rating = r.Rating,
-                        comment = r.Comment,
-                        date = r.ReviewDate?.ToString("MMM dd, yyyy") ?? "N/A"
-                    }))
+                        isWithinRadius = true;
+                    }
+                }
+
+                // --- TIME SLOTS FETCHING (IF WITHIN RADIUS) ---
+                var timeSlots = new List<object>();
+                if (isWithinRadius)
+                {
+                    var rawTimeSlots = await _context.WorkerTimeSlots
+                        .Where(ts => ts.WorkerId == worker.WorkerId)
+                        .ToListAsync();
+
+                    timeSlots = rawTimeSlots.Select(ts => new
+                    {
+                        id = ts.Id,
+                        startTime = ts.StartTime.ToString(@"hh\:mm"),
+                        endTime = ts.EndTime.ToString(@"hh\:mm")
+                    }).ToList<object>();
+                }
+
+                // Reviews processing
+                var allReviews = worker.Interviews
+                    .SelectMany(i => i.Reviews
+                        .Where(r => r.ReviewerRole == "Client")
+                        .Select(r => new
+                        {
+                            clientId = i.ClientId,
+                            reviewerName = i.Client?.Name ?? "Anonymous",
+                            rating = r.Rating,
+                            comment = r.Comment,
+                            date = r.ReviewDate?.ToString("MMM dd, yyyy") ?? "N/A"
+                        }))
                     .ToList();
 
                 double avgRating = allReviews.Any() ? Math.Round(allReviews.Average(r => (double)(r.rating ?? 0)), 1) : 0.0;
@@ -376,12 +432,11 @@ namespace Fyp_Backend.Controllers
                 int jobNotificationCount = await _context.Hiring.CountAsync(h => h.Interview.WorkerId == worker.WorkerId && h.WorkerDecision == "Pending");
                 int terminationCount = worker.Interviews.Count(i => i.Status == "Terminated");
 
-                // 1. Fetch raw junction data first
+                // Fetch junction skills
                 var junctionData = await _context.WorkerCategories
                     .Where(wc => wc.WorkerId == worker.WorkerId)
                     .ToListAsync();
 
-                // 2. Fetch lookup data safely
                 var categories = await _context.Categories.ToListAsync();
                 var categoryLookup = categories
                     .GroupBy(c => c.CategoryId)
@@ -392,7 +447,6 @@ namespace Fyp_Backend.Controllers
                     .GroupBy(s => s.SkillsId)
                     .ToDictionary(g => g.Key, g => g.First().SkillName);
 
-                // 3. Process into Primary vs Part-Time based on sequence
                 var primarySkills = new List<string>();
                 var partTimeSkills = new List<object>();
                 string primaryCategoryName = null;
@@ -440,7 +494,7 @@ namespace Fyp_Backend.Controllers
                     picture = worker.Picture,
                     bio = worker.Bio ?? "Professional service provider committed to excellence and reliability.",
                     role = primaryCategoryName ?? "General Worker",
-                    categoryId = primaryCategoryId, // Assigned from tracking loop logic directly instead of worker.CategoryId
+                    categoryId = primaryCategoryId,
                     location = worker.Address ?? "N/A",
                     salary = worker.Salary != null ? worker.Salary.ToString() : "Not Set",
                     gender = worker.Gender ?? "N/A",
@@ -453,6 +507,11 @@ namespace Fyp_Backend.Controllers
                     terminationCount = terminationCount,
                     hasActiveInterview = hasActiveInterview,
                     activeInterviewStatus = activeInterviewStatus,
+
+                    // Distance & Part Time Radius Info
+                    isPartTimeAvailable = isWithinRadius,
+                    distanceKm = Math.Round(distanceKm, 2),
+                    timeSlots = timeSlots,
 
                     primarySkills = primarySkills,
                     cnic = worker.Cnic,
@@ -486,6 +545,194 @@ namespace Fyp_Backend.Controllers
             }
         }
 
+        // Helper: Haversine distance formula calculation
+        private double CalculateHaversineDistance(double lat1, double lon1, double lat2, double lon2)
+        {
+            const double R = 6371.0; // Earth radius in kilometers
+            double dLat = ToRadians(lat2 - lat1);
+            double dLon = ToRadians(lon2 - lon1);
+
+            double a = Math.Sin(dLat / 2) * Math.Sin(dLat / 2) +
+                       Math.Cos(ToRadians(lat1)) * Math.Cos(ToRadians(lat2)) *
+                       Math.Sin(dLon / 2) * Math.Sin(dLon / 2);
+
+            double c = 2 * Math.Atan2(Math.Sqrt(a), Math.Sqrt(1 - a));
+            return R * c;
+        }
+
+        private double ToRadians(double val) => (Math.PI / 180.0) * val;
+        //    [HttpGet("GetWorkerDetail/{id}")]
+        //    public async Task<IActionResult> GetWorkerDetail(int id)
+        //    {
+        //        try
+        //        {
+        //            var worker = await _context.Workers
+        //                .Include(w => w.Experiences)
+        //                .Include(w => w.Interviews)
+        //                    .ThenInclude(i => i.Reviews)
+        //                .Include(w => w.Interviews)
+        //                    .ThenInclude(i => i.Client)
+        //                .FirstOrDefaultAsync(w => w.WorkerId == id);
+
+        //            if (worker == null)
+        //                return NotFound(new { message = "Worker not found" });
+
+        //            var userIdStr = User.FindFirst(ClaimTypes.NameIdentifier)?.Value
+        //                         ?? User.FindFirst(System.IdentityModel.Tokens.Jwt.JwtRegisteredClaimNames.Sub)?.Value;
+        //            bool hasActiveInterview = false;
+        //            string activeInterviewStatus = null;
+        //            if (!string.IsNullOrEmpty(userIdStr) && int.TryParse(userIdStr, out int clientId))
+        //            {
+        //                var activeInt = worker.Interviews.FirstOrDefault(i =>
+        //                    i.ClientId == clientId &&
+        //                    i.WorkerDecision != "Rejected" &&
+        //                    i.Status != "Rejected" &&
+        //                    i.Status != "Completed" &&
+        //                    i.Status != "Terminated"
+        //                );
+        //                hasActiveInterview = activeInt != null;
+        //                activeInterviewStatus = activeInt?.Status;
+        //            }
+
+        //            // Flatten Reviews and calculate rating
+        //            //var allReviews = worker.Interviews
+        //            //    .SelectMany(i => i.Reviews.Select(r => new
+        //            //    {
+        //            //        reviewerName = i.Client?.Name ?? "Anonymous",
+        //            //        rating = r.Rating,
+        //            //        comment = r.Comment,
+        //            //        date = r.ReviewDate?.ToString("MMM dd, yyyy") ?? "N/A"
+        //            //    }))
+        //            //    .ToList();
+        //            var allReviews = worker.Interviews
+        //.SelectMany(i => i.Reviews
+        //    .Where(r => r.ReviewerRole == "Client")
+        //    .Select(r => new
+        //    {
+        //        reviewerName = i.Client?.Name ?? "Anonymous",
+        //        rating = r.Rating,
+        //        comment = r.Comment,
+        //        date = r.ReviewDate?.ToString("MMM dd, yyyy") ?? "N/A"
+        //    }))
+        //.ToList();
+
+        //            double avgRating = allReviews.Any() ? Math.Round(allReviews.Average(r => (double)(r.rating ?? 0)), 1) : 0.0;
+
+        //            int pendingRequestCount = worker.Interviews.Count(i => i.WorkerDecision == null || i.WorkerDecision == "Pending");
+        //            int jobNotificationCount = await _context.Hiring.CountAsync(h => h.Interview.WorkerId == worker.WorkerId && h.WorkerDecision == "Pending");
+        //            int terminationCount = worker.Interviews.Count(i => i.Status == "Terminated");
+
+        //            // 1. Fetch raw junction data first
+        //            var junctionData = await _context.WorkerCategories
+        //                .Where(wc => wc.WorkerId == worker.WorkerId)
+        //                .ToListAsync();
+
+        //            // 2. Fetch lookup data safely
+        //            var categories = await _context.Categories.ToListAsync();
+        //            var categoryLookup = categories
+        //                .GroupBy(c => c.CategoryId)
+        //                .ToDictionary(g => g.Key, g => g.First().CategoryName);
+
+        //            var skills = await _context.Skills.ToListAsync();
+        //            var skillLookup = skills
+        //                .GroupBy(s => s.SkillsId)
+        //                .ToDictionary(g => g.Key, g => g.First().SkillName);
+
+        //            // 3. Process into Primary vs Part-Time based on sequence
+        //            var primarySkills = new List<string>();
+        //            var partTimeSkills = new List<object>();
+        //            string primaryCategoryName = null;
+        //            int? primaryCategoryId = null;
+
+        //            var partTimeGroups = new Dictionary<string, List<string>>();
+
+        //            foreach (var item in junctionData)
+        //            {
+        //                if (primaryCategoryId == null)
+        //                {
+        //                    primaryCategoryId = item.CategoryId;
+        //                    categoryLookup.TryGetValue(item.CategoryId, out primaryCategoryName);
+        //                }
+
+        //                if (item.CategoryId == primaryCategoryId)
+        //                {
+        //                    if (skillLookup.TryGetValue(item.SkillsId, out var skillName))
+        //                    {
+        //                        if (!primarySkills.Contains(skillName)) primarySkills.Add(skillName);
+        //                    }
+        //                }
+        //                else
+        //                {
+        //                    if (categoryLookup.TryGetValue(item.CategoryId, out var catName))
+        //                    {
+        //                        if (!partTimeGroups.ContainsKey(catName)) partTimeGroups[catName] = new List<string>();
+        //                        if (skillLookup.TryGetValue(item.SkillsId, out var sName))
+        //                        {
+        //                            if (!partTimeGroups[catName].Contains(sName)) partTimeGroups[catName].Add(sName);
+        //                        }
+        //                    }
+        //                }
+        //            }
+
+        //            foreach (var kvp in partTimeGroups)
+        //            {
+        //                partTimeSkills.Add(new { categoryName = kvp.Key, skills = kvp.Value });
+        //            }
+
+        //            var result = new
+        //            {
+        //                id = worker.WorkerId,
+        //                name = worker.Name,
+        //                picture = worker.Picture,
+        //                bio = worker.Bio ?? "Professional service provider committed to excellence and reliability.",
+        //                role = primaryCategoryName ?? "General Worker",
+        //                categoryId = primaryCategoryId, // Assigned from tracking loop logic directly instead of worker.CategoryId
+        //                location = worker.Address ?? "N/A",
+        //                salary = worker.Salary != null ? worker.Salary.ToString() : "Not Set",
+        //                gender = worker.Gender ?? "N/A",
+        //                availability = worker.AvailableStatus == true ? "Available 24/7" : "NOT AVAILABLE",
+        //                availableStatus = worker.AvailableStatus ?? false,
+        //                rating = avgRating.ToString("F1"),
+        //                reviewCount = allReviews.Count,
+        //                pendingRequestCount = pendingRequestCount,
+        //                jobNotificationCount = jobNotificationCount,
+        //                terminationCount = terminationCount,
+        //                hasActiveInterview = hasActiveInterview,
+        //                activeInterviewStatus = activeInterviewStatus,
+
+        //                primarySkills = primarySkills,
+        //                cnic = worker.Cnic,
+        //                phone = worker.Phone,
+        //                age = worker.Age,
+
+        //                rawExperiences = worker.Experiences.Select(e => new
+        //                {
+        //                    CategoryId = e.CategoryId,
+        //                    SkillsId = e.SkillsId,
+        //                    WorkAt = e.WorkAt,
+        //                    Duration = e.Duration,
+        //                    ExpDetail = e.ExpDetail
+        //                }).ToList(),
+
+        //                experiences = worker.Experiences.Select(e => new
+        //                {
+        //                    title = e.WorkAt ?? "Previous Role",
+        //                    period = e.Duration ?? "N/A",
+        //                    details = e.ExpDetail ?? ""
+        //                }).ToList(),
+        //                reviews = allReviews,
+        //                partTimeSkills = partTimeSkills
+        //            };
+
+        //            return Ok(result);
+        //        }
+        //        catch (Exception ex)
+        //        {
+        //            return StatusCode(500, new { message = "Error fetching worker details: " + ex.Message, detail = ex.ToString() });
+        //        }
+        //    }
+
+
         [HttpGet("GetWorkerReviews/{workerId}")]
         public async Task<IActionResult> GetWorkerReviews(int workerId)
         {
@@ -501,26 +748,29 @@ namespace Fyp_Backend.Controllers
                 if (worker == null)
                     return NotFound(new { message = "Worker not found" });
 
-                var allReviews = worker.Interviews
-                    .SelectMany(i => i.Reviews.Select(r => new
-                    {
-                        id = r.ReviewId.ToString(),
-                        name = i.Client?.Name ?? "Anonymous",
-                        rating = r.Rating ?? 0,
-                        comment = r.Comment ?? "",
-                        date = r.ReviewDate?.ToString("MMM dd, yyyy") ?? "N/A",
-                        duration = "Previous Client"
-                    }))
+                var clientReviews = worker.Interviews
+                    .SelectMany(i => i.Reviews
+                        .Where(r => r.ReviewerRole == "Client")
+                        .Select(r => new
+                        {
+                            id = r.ReviewId.ToString(),
+                            clientId = i.ClientId, // Ensure ClientId is cleanly passed here
+                            name = i.Client != null ? i.Client.Name : "Client",
+                            rating = r.Rating ?? 0,
+                            comment = r.Comment ?? "",
+                            date = r.ReviewDate?.ToString("MMM dd, yyyy") ?? "N/A",
+                            duration = "Previous Client"
+                        }))
                     .OrderByDescending(r => r.id)
                     .ToList();
 
-                double avgRating = allReviews.Any() ? Math.Round(allReviews.Average(r => (double)r.rating), 1) : 0.0;
+                double avgRating = clientReviews.Any() ? Math.Round(clientReviews.Average(r => (double)r.rating), 1) : 0.0;
 
                 return Ok(new
                 {
                     averageRating = avgRating,
-                    reviewCount = allReviews.Count,
-                    reviews = allReviews
+                    reviewCount = clientReviews.Count,
+                    reviews = clientReviews
                 });
             }
             catch (Exception ex)
@@ -528,6 +778,49 @@ namespace Fyp_Backend.Controllers
                 return StatusCode(500, new { message = "Error fetching worker reviews: " + ex.Message });
             }
         }
+
+        //[HttpGet("GetWorkerReviews/{workerId}")]
+        //public async Task<IActionResult> GetWorkerReviews(int workerId)
+        //{
+        //    try
+        //    {
+        //        var worker = await _context.Workers
+        //            .Include(w => w.Interviews)
+        //                .ThenInclude(i => i.Reviews)
+        //            .Include(w => w.Interviews)
+        //                .ThenInclude(i => i.Client)
+        //            .FirstOrDefaultAsync(w => w.WorkerId == workerId);
+
+        //        if (worker == null)
+        //            return NotFound(new { message = "Worker not found" });
+
+        //        var allReviews = worker.Interviews
+        //            .SelectMany(i => i.Reviews.Select(r => new
+        //            {
+        //                id = r.ReviewId.ToString(),
+        //                name = i.Client?.Name ?? "Anonymous",
+        //                rating = r.Rating ?? 0,
+        //                comment = r.Comment ?? "",
+        //                date = r.ReviewDate?.ToString("MMM dd, yyyy") ?? "N/A",
+        //                duration = "Previous Client"
+        //            }))
+        //            .OrderByDescending(r => r.id)
+        //            .ToList();
+
+        //        double avgRating = allReviews.Any() ? Math.Round(allReviews.Average(r => (double)r.rating), 1) : 0.0;
+
+        //        return Ok(new
+        //        {
+        //            averageRating = avgRating,
+        //            reviewCount = allReviews.Count,
+        //            reviews = allReviews
+        //        });
+        //    }
+        //    catch (Exception ex)
+        //    {
+        //        return StatusCode(500, new { message = "Error fetching worker reviews: " + ex.Message });
+        //    }
+        //}
 
         [HttpGet("GetFiltersData")]
         public async Task<IActionResult> GetFiltersData()
@@ -732,12 +1025,16 @@ namespace Fyp_Backend.Controllers
                     {
                         id = i.InterviewId.ToString(),
                         client = i.Client != null ? i.Client.Name : "Unknown Client",
+                        clientId=i.Client.ClientId,
                         location = i.Address ?? "N/A",
                         timeRaw = i.InterviewDate,
                         time = i.InterviewDate != null ? i.InterviewDate.Value.ToString("MMM dd, hh:mm tt") : "Not Set",
                         service = "Interview Request",
                         clientPhone = i.Client != null ? i.Client.Phone : "N/A",
-                        clientPicture = i.Client != null ? i.Client.Picture : null
+                        clientPicture = i.Client != null ? i.Client.Picture : null,
+                        clientRating = i.Client != null ? (_context.Reviews.Any(r => r.Interview!.ClientId == i.ClientId && r.ReviewerRole == "Worker") 
+                            ? Math.Round(_context.Reviews.Where(r => r.Interview!.ClientId == i.ClientId && r.ReviewerRole == "Worker").Average(r => (double)r.Rating!), 1) 
+                            : 0.0) : 0.0
                     })
                     .ToListAsync();
 
@@ -769,12 +1066,16 @@ namespace Fyp_Backend.Controllers
                     {
                         id = i.InterviewId.ToString(),
                         client = i.Client != null ? i.Client.Name : "Unknown Client",
+                        clientId = i.Client.ClientId,
                         location = i.Address ?? "N/A",
                         timeRaw = i.InterviewDate,
                         time = i.InterviewDate != null ? i.InterviewDate.Value.ToString("MMM dd, hh:mm tt") : "Not Set",
                         service = "Interview Request",
                         clientPhone = i.Client != null ? i.Client.Phone : "N/A",
-                        clientPicture = i.Client != null ? i.Client.Picture : null
+                        clientPicture = i.Client != null ? i.Client.Picture : null,
+                        clientRating = i.Client != null ? (_context.Reviews.Any(r => r.Interview!.ClientId == i.ClientId && r.ReviewerRole == "Worker") 
+                            ? Math.Round(_context.Reviews.Where(r => r.Interview!.ClientId == i.ClientId && r.ReviewerRole == "Worker").Average(r => (double)r.Rating!), 1) 
+                            : 0.0) : 0.0
                     })
                     .ToListAsync();
 
@@ -846,16 +1147,69 @@ namespace Fyp_Backend.Controllers
                     {
                         id = h.InterviewId.ToString(),
                         clientName = h.Interview.Client != null ? h.Interview.Client.Name : "Client",
+                        clientId = h.Interview.Client != null ? h.Interview.Client.ClientId : (int?)null,
                         status = h.Interview.Status,
                         date = h.HiringDate != null ? h.HiringDate.Value.ToString("dd-MM-yyyy") : "Pending",
                         role = _context.WorkerCategories.Where(wc => wc.WorkerId == h.Interview.WorkerId).Join(_context.Categories, wc => wc.CategoryId, c => c.CategoryId, (wc, c) => c.CategoryName).FirstOrDefault() ?? "Worker",
                         address = h.Address ?? "Pending",
                         hiringDecision = h.HiringDecision ?? "Pending",
                         workerDecision = h.WorkerDecision ?? "Pending",
-                        clientImage = h.Interview.Client != null ? h.Interview.Client.Picture : null
+                        clientImage = h.Interview.Client != null ? h.Interview.Client.Picture : null,
+                        clientRating = h.Interview.Client != null ? (_context.Reviews.Any(r => r.Interview!.ClientId == h.Interview.ClientId && r.ReviewerRole == "Worker") 
+                            ? Math.Round(_context.Reviews.Where(r => r.Interview!.ClientId == h.Interview.ClientId && r.ReviewerRole == "Worker").Average(r => (double)r.Rating!), 1) 
+                            : 0.0) : 0.0
                     })
                     .ToListAsync();
 
+                //var mappedJobs = jobs.Select(item =>
+                //{
+                //    string type;
+                //    string msg;
+                //    string displayStatus;
+                //    if (item.workerDecision == "Rejected")
+                //    {
+                //        type = "rejected";
+                //        msg = "Thank you for your time. Job offer declined.";
+                //        displayStatus = "Rejected";
+                //    }
+                //    else if (item.status == "Terminated")
+                //    {
+                //        type = "terminated";
+                //        msg = "Your contract has been terminated by the client.";
+                //        displayStatus = "Terminated";
+                //    }
+                //    else if (item.hiringDecision == "Accepted")
+                //    {
+                //        type = "final";
+                //        msg = "Congratulations! You are officially hired. Welcome aboard!";
+                //        displayStatus = "Hired";
+                //    }
+                //    else if (item.workerDecision == "Accepted")
+                //    {
+                //        type = "accepted";
+                //        msg = "Job offer accepted. Awaiting client response.";
+                //        displayStatus = "Accepted";
+                //    }
+                //    else
+                //    {
+                //        type = "offered";
+                //        msg = "Great interview! We'd like to proceed with a contract.";
+                //        displayStatus = "Pending";
+                //    }
+                //    return new
+                //    {
+                //        id = item.id,
+                //        clientName = item.clientName,
+                //        clientRating = item.clientRating,
+                //        status = displayStatus,
+                //        date = item.date,
+                //        role = item.role,
+                //        address = item.address,
+                //        message = msg,
+                //        type = type,
+                //        clientImage = item.clientImage
+                //    };
+                //});
                 var mappedJobs = jobs.Select(item =>
                 {
                     string type;
@@ -894,7 +1248,9 @@ namespace Fyp_Backend.Controllers
                     return new
                     {
                         id = item.id,
+                        clientId = item.clientId, // <-- ADD THIS LINE
                         clientName = item.clientName,
+                        clientRating = item.clientRating,
                         status = displayStatus,
                         date = item.date,
                         role = item.role,
@@ -1355,6 +1711,7 @@ namespace Fyp_Backend.Controllers
                     InterviewId = model.InterviewId,
                     Rating = model.Rating,
                     Comment = model.Comment,
+                    ReviewerRole = "Client",
                     ReviewDate = DateTime.Now
                 };
                 _context.Reviews.Add(review);
@@ -1389,6 +1746,7 @@ namespace Fyp_Backend.Controllers
                     InterviewId = request.InterviewId,
                     Rating = request.Rating,
                     Comment = request.Remarks,
+                    ReviewerRole = "Client",
                     ReviewDate = DateTime.Now
                 };
                 _context.Reviews.Add(review);
@@ -1468,6 +1826,7 @@ namespace Fyp_Backend.Controllers
                     .Select(t => new
                     {
                         t.TerminationId,
+                        t.InterviewId,
                         t.TerminatedDate,
                         t.TerminatedReason,
                         ClientName = t.Interview.Client.Name,
@@ -1587,6 +1946,239 @@ namespace Fyp_Backend.Controllers
             public string? Remarks { get; set; }
             public int Rating { get; set; }
         }
+
+        [HttpPost("SubmitWorkerReviewToClient")]
+        public async Task<IActionResult> SubmitWorkerReviewToClient([FromBody] Review model)
+        {
+            try
+            {
+                var userIdStr = User.FindFirst(ClaimTypes.NameIdentifier)?.Value
+                             ?? User.FindFirst(System.IdentityModel.Tokens.Jwt.JwtRegisteredClaimNames.Sub)?.Value;
+                if (string.IsNullOrEmpty(userIdStr)) return Unauthorized(new { message = "Invalid user session." });
+
+                var interview = await _context.Interviews.FindAsync(model.InterviewId);
+                if (interview == null) return NotFound(new { message = "Record not found." });
+
+                var review = new Review
+                {
+                    InterviewId = model.InterviewId,
+                    Rating = model.Rating,
+                    Comment = model.Comment,
+                    ReviewerRole = "Worker",
+                    ReviewDate = DateTime.Now
+                };
+                _context.Reviews.Add(review);
+                await _context.SaveChangesAsync();
+                
+                return Ok(new { message = "Review submitted successfully." });
+            }
+            catch (Exception ex)
+            {
+                return StatusCode(500, new { message = "Error: " + ex.Message });
+            }
+        }
+
+        [HttpGet("GetClientProfile/{clientId}")]
+        public async Task<IActionResult> GetClientProfile(int clientId)
+        {
+            try
+            {
+                var client = await _context.Clients.FindAsync(clientId);
+                if (client == null) return NotFound(new { message = "Client not found." });
+                
+                var reviews = await _context.Reviews
+                    .Include(r => r.Interview)
+                        .ThenInclude(i => i.Worker)
+                    .Where(r => r.Interview != null && r.Interview.ClientId == clientId && r.ReviewerRole == "Worker")
+                    .Select(r => new {
+                        reviewerName = r.Interview!.Worker != null ? r.Interview.Worker.Name : "Anonymous Worker",
+                        rating = r.Rating,
+                        comment = r.Comment,
+                        date = r.ReviewDate != null ? r.ReviewDate.Value.ToString("MMM dd, yyyy") : "N/A"
+                    })
+                    .OrderByDescending(r => r.date)
+                    .ToListAsync();
+                    
+                double avgRating = reviews.Any() ? Math.Round(reviews.Average(r => (double)(r.rating ?? 0)), 1) : 0.0;
+                
+                return Ok(new {
+                    clientId = client.ClientId,
+                    name = client.Name,
+                    phone = client.Phone,
+                    address = client.Address,
+                    picture = client.Picture,
+                    rating = avgRating,
+                    reviewCount = reviews.Count,
+                    reviews = reviews
+                });
+            }
+            catch (Exception ex)
+            {
+                return StatusCode(500, new { message = "Error fetching client profile: " + ex.Message });
+            }
+        }
+        [AllowAnonymous]
+        [HttpGet("GetClientDetail/{clientId}")]
+        public async Task<IActionResult> GetClientDetail(int clientId)
+        {
+            try
+            {
+                var client = await _context.Clients
+                    .FirstOrDefaultAsync(c => c.ClientId == clientId);
+
+                if (client == null)
+                    return NotFound(new { message = "Client profile not found." });
+
+                // Fetch reviews left by Workers for this Client
+                var workerReviewsOfClient = await _context.Reviews
+                    .Include(r => r.Interview)
+                        .ThenInclude(i => i.Worker)
+                    .Where(r => r.Interview.ClientId == clientId && r.ReviewerRole == "Worker")
+                    .Select(r => new
+                    {
+                        id = r.ReviewId.ToString(),
+                        reviewerName = r.Interview.Worker != null ? r.Interview.Worker.Name : "Anonymous Worker",
+                        reviewerImage = r.Interview.Worker != null ? r.Interview.Worker.Picture : "",
+                        rating = r.Rating ?? 0,
+                        comment = r.Comment ?? "",
+                        date = r.ReviewDate.HasValue ? r.ReviewDate.Value.ToString("MMM dd, yyyy") : "N/A"
+                    })
+                    .OrderByDescending(r => r.id)
+                    .ToListAsync();
+
+                double avgRating = workerReviewsOfClient.Any()
+                    ? Math.Round(workerReviewsOfClient.Average(r => (double)r.rating), 1)
+                    : 0.0;
+
+                return Ok(new
+                {
+                    clientId = client.ClientId,
+                    name = client.Name,
+                    email = client.Email,
+                    phone = client.Phone,
+                    address = client.Address,
+                    picture = client.Picture,
+                    rating = avgRating,
+                    reviewCount = workerReviewsOfClient.Count,
+                    reviews = workerReviewsOfClient
+                });
+            }
+            catch (Exception ex)
+            {
+                return StatusCode(500, new { message = "Error loading client profile: " + ex.Message });
+            }
+        }
+        [HttpPut("UpdateWorkerLocation")]
+        public async Task<IActionResult> UpdateWorkerLocation([FromBody] UpdateWorkerLocationDto dto)
+        {
+            var worker = await _context.Workers.FindAsync(dto.WorkerId);
+            if (worker == null) return NotFound("Worker not found.");
+
+            worker.Latitude = dto.Latitude;
+            worker.Longitude = dto.Longitude;
+
+            await _context.SaveChangesAsync();
+            return Ok(new { message = "Worker location updated successfully." });
+        }
+        [HttpGet("GetWorkerTimeSlots/{workerId}")]
+        public async Task<IActionResult> GetWorkerTimeSlots(int workerId)
+        {
+            try
+            {
+                var slots = await _context.WorkerTimeSlots
+                    .Where(s => s.WorkerId == workerId)
+                    .Select(s => new
+                    {
+                        s.Id,
+                        s.WorkerId,
+                        StartTime = DateTime.Today.Add(s.StartTime).ToString("hh:mm tt"),
+                        EndTime = DateTime.Today.Add(s.EndTime).ToString("hh:mm tt"),
+                        RawStartTime = s.StartTime.ToString(@"hh\:mm"),
+                        RawEndTime = s.EndTime.ToString(@"hh\:mm")
+                    })
+                    .ToListAsync();
+
+                return Ok(slots);
+            }
+            catch (Exception ex)
+            {
+                return StatusCode(500, new { message = "Error retrieving time slots: " + ex.Message });
+            }
+        }
+
+        // 2. POST: Add a new time slot for a worker
+        [HttpPost("AddTimeSlot")]
+        public async Task<IActionResult> AddTimeSlot([FromBody] WorkerTimeSlots slot)
+        {
+            try
+            {
+                if (slot == null || slot.WorkerId <= 0)
+                {
+                    return BadRequest(new { message = "Invalid time slot data." });
+                }
+
+                _context.WorkerTimeSlots.Add(slot);
+                await _context.SaveChangesAsync();
+
+                return Ok(new { message = "Time slot added successfully!", slotId = slot.Id });
+            }
+            catch (Exception ex)
+            {
+                return StatusCode(500, new { message = "Error adding time slot: " + ex.Message });
+            }
+        }
+
+        // 3. DELETE: Remove a time slot
+        [HttpDelete("DeleteTimeSlot/{id}")]
+        public async Task<IActionResult> DeleteTimeSlot(int id)
+        {
+            try
+            {
+                var slot = await _context.WorkerTimeSlots.FindAsync(id);
+                if (slot == null)
+                {
+                    return NotFound(new { message = "Time slot not found." });
+                }
+
+                _context.WorkerTimeSlots.Remove(slot);
+                await _context.SaveChangesAsync();
+
+                return Ok(new { message = "Time slot deleted successfully." });
+            }
+            catch (Exception ex)
+            {
+                return StatusCode(500, new { message = "Error deleting time slot: " + ex.Message });
+            }
+        }
+
+        [HttpPut("UpdateWorkerRadius/{workerId}")]
+        public async Task<IActionResult> UpdateWorkerRadius(int workerId, [FromBody] int radius)
+        {
+            try
+            {
+                if (radius < 1 || radius > 50)
+                    return BadRequest(new { message = "Invalid radius distance." });
+
+                var worker = await _context.Workers.FindAsync(workerId);
+                if (worker == null) return NotFound(new { message = "Worker not found." });
+
+                worker.Radius = radius;
+                await _context.SaveChangesAsync();
+
+                return Ok(new { message = "Work radius updated successfully", radius = worker.Radius });
+            }
+            catch (Exception ex)
+            {
+                return StatusCode(500, new { message = "Error updating radius: " + ex.Message });
+            }
+        }
+
+    }
+    public class UpdateWorkerLocationDto
+    {
+        public int WorkerId { get; set; }
+        public decimal Latitude { get; set; }
+        public decimal Longitude { get; set; }
     }
     public class HiringDto
     {
@@ -1594,4 +2186,6 @@ namespace Fyp_Backend.Controllers
         public string? HiringDecision { get; set; }
         public string? Address { get; set; }
     }
-}
+    }
+
+

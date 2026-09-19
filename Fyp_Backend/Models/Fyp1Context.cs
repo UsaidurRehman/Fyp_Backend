@@ -31,6 +31,7 @@ public partial class Fyp1Context : DbContext
     public virtual DbSet<PoliceOfficer> PoliceOfficers { get; set; }
     public virtual DbSet<WorkerCertification> WorkerCertifications { get; set; }
     public virtual DbSet<PoliceRecord> PoliceRecords { get; set; }
+    public virtual DbSet<WorkerTimeSlots> WorkerTimeSlots { get; set; }
 
     // Updated naming to match standard conventions
     public virtual DbSet<WorkerCategory> WorkerCategories { get; set; }
@@ -119,6 +120,10 @@ public partial class Fyp1Context : DbContext
             entity.Property(e => e.Comment).HasColumnType("text");
             entity.Property(e => e.InterviewId).HasColumnName("Interview_ID");
             entity.Property(e => e.ReviewDate).HasDefaultValueSql("(getdate())").HasColumnType("datetime");
+            entity.Property(e => e.ReviewerRole)
+                .HasMaxLength(50)
+                .IsUnicode(false)
+                .HasDefaultValue("Client");
 
             entity.HasOne(d => d.Interview).WithMany(p => p.Reviews)
                 .HasForeignKey(d => d.InterviewId)
@@ -181,6 +186,9 @@ public partial class Fyp1Context : DbContext
             entity.Property(e => e.Phone).HasMaxLength(20).IsUnicode(false);
             entity.Property(e => e.Picture).HasMaxLength(255).IsUnicode(false);
             entity.Property(e => e.Salary).HasColumnType("decimal(10, 2)");
+            entity.Property(e => e.Latitude).HasColumnName("Latitude");
+            entity.Property(e => e.Longitude).HasColumnName("Longitude");
+            entity.Property(e => e.Radius).HasColumnName("Radius").HasDefaultValue(5);
         });
 
         modelBuilder.Entity<Hiring>(entity =>
@@ -291,6 +299,21 @@ public partial class Fyp1Context : DbContext
             entity.HasOne(d => d.Worker)
                 .WithMany()
                 .HasForeignKey(d => d.WorkerID);
+        });
+
+        modelBuilder.Entity<WorkerTimeSlots>(entity =>
+        {
+            entity.ToTable("WorkerTimeSlots");
+            entity.HasKey(e => e.Id);
+
+            entity.Property(e => e.WorkerId).HasColumnName("WorkerId");
+            entity.Property(e => e.StartTime).HasColumnType("time");
+            entity.Property(e => e.EndTime).HasColumnType("time");
+
+            entity.HasOne<Worker>()
+                .WithMany()
+                .HasForeignKey(e => e.WorkerId)
+                .OnDelete(DeleteBehavior.Cascade);
         });
 
         OnModelCreatingPartial(modelBuilder);

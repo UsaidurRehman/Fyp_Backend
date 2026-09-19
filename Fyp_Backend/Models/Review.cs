@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
 
 namespace Fyp_Backend.Models;
@@ -14,6 +14,8 @@ public partial class Review
     public string? Comment { get; set; }
 
     public DateTime? ReviewDate { get; set; }
+
+    public string? ReviewerRole { get; set; }
 
     public virtual Interview? Interview { get; set; }
 }

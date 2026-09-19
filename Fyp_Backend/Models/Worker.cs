@@ -21,6 +21,10 @@ public partial class Worker
     public string? Password { get; set; }
     public string? Gender { get; set; }
     public string? Bio { get; set; }
+    public decimal? Latitude { get; set; }
+    public decimal? Longitude { get; set; }
+    public int Radius { get; set; } = 5;
+    
     public virtual ICollection<Experience> Experiences { get; set; } = new List<Experience>();
 
     public virtual ICollection<Interview> Interviews { get; set; } = new List<Interview>();
