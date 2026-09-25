@@ -325,6 +325,7 @@ namespace Fyp_Backend.Controllers
                 return StatusCode(500, new { message = "Error: " + ex.Message });
             }
         }
+
         [HttpGet("GetWorkerDetail/{id}")]
         public async Task<IActionResult> GetWorkerDetail(int id, [FromQuery] int? clientIdParam = null)
         {
@@ -356,7 +357,8 @@ namespace Fyp_Backend.Controllers
                 }
 
                 bool hasActiveInterview = false;
-                string activeInterviewStatus = null;
+                string? activeInterviewStatus = null;
+                string? activeJobType = null;  // job type of the running contract with this client
                 var client = await _context.Clients.FirstOrDefaultAsync(c => c.ClientId == clientId);
 
                 if (client != null)
@@ -366,15 +368,21 @@ namespace Fyp_Backend.Controllers
                         i.WorkerDecision != "Rejected" &&
                         i.Status != "Rejected" &&
                         i.Status != "Completed" &&
-                        i.Status != "Terminated"
+                        i.Status != "Terminated" &&
+                        // Part-time: a finalized/active part-time contract does not block
+                        // the same client from booking extra slots. In-flight requests
+                        // (Pending / Approved / worker-accepted-but-not-hired) still block.
+                        !(i.JobType == "Part-Time" && (i.Status == "Finalized" || i.Status == "Hired"))
                     );
                     hasActiveInterview = activeInt != null;
                     activeInterviewStatus = activeInt?.Status;
+                    activeJobType = activeInt != null ? (activeInt.JobType ?? "Full-Time") : null;
                 }
 
                 // --- HAVERSINE RADIUS DISTANCE CALCULATION ---
                 bool isWithinRadius = false;
                 double distanceKm = 0;
+                double workerRadius = worker.Radius > 0 ? worker.Radius : 5.0; // default 5 km
 
                 if (client != null &&
                     worker.Latitude.HasValue && worker.Longitude.HasValue &&
@@ -386,9 +394,6 @@ namespace Fyp_Backend.Controllers
                     double clientLng = Convert.ToDouble(client.Longitude.Value);
 
                     distanceKm = CalculateHaversineDistance(clientLat, clientLng, workerLat, workerLng);
-
-                    // Fetch radius from worker (Default to 5 km if null or zero)
-                    double workerRadius = worker.Radius > 0 ? worker.Radius : 5.0;
 
                     if (distanceKm <= workerRadius)
                     {
@@ -449,7 +454,7 @@ namespace Fyp_Backend.Controllers
 
                 var primarySkills = new List<string>();
                 var partTimeSkills = new List<object>();
-                string primaryCategoryName = null;
+                string? primaryCategoryName = null;
                 int? primaryCategoryId = null;
 
                 var partTimeGroups = new Dictionary<string, List<string>>();
@@ -511,6 +516,9 @@ namespace Fyp_Backend.Controllers
                     // Distance & Part Time Radius Info
                     isPartTimeAvailable = isWithinRadius,
                     distanceKm = Math.Round(distanceKm, 2),
+                    radius = workerRadius,
+                    // Type of the contract currently running with this client, if any
+                    activeJobType = activeJobType,
                     timeSlots = timeSlots,
 
                     primarySkills = primarySkills,
@@ -544,6 +552,229 @@ namespace Fyp_Backend.Controllers
                 return StatusCode(500, new { message = "Error fetching worker details: " + ex.Message, detail = ex.ToString() });
             }
         }
+        //public async Task<IActionResult> GetWorkerDetail(int id, [FromQuery] int? clientIdParam = null)
+        //{
+        //    try
+        //    {
+        //        var worker = await _context.Workers
+        //            .Include(w => w.Experiences)
+        //            .Include(w => w.Interviews)
+        //                .ThenInclude(i => i.Reviews)
+        //            .Include(w => w.Interviews)
+        //                .ThenInclude(i => i.Client)
+        //            .FirstOrDefaultAsync(w => w.WorkerId == id);
+
+        //        if (worker == null)
+        //            return NotFound(new { message = "Worker not found" });
+
+        //        // Extract Client ID from Claims or Query Parameter
+        //        var userIdStr = User.FindFirst(ClaimTypes.NameIdentifier)?.Value
+        //                     ?? User.FindFirst(System.IdentityModel.Tokens.Jwt.JwtRegisteredClaimNames.Sub)?.Value;
+
+        //        int clientId = 0;
+        //        if (!string.IsNullOrEmpty(userIdStr))
+        //        {
+        //            int.TryParse(userIdStr, out clientId);
+        //        }
+        //        if (clientId == 0 && clientIdParam.HasValue)
+        //        {
+        //            clientId = clientIdParam.Value;
+        //        }
+
+        //        bool hasActiveInterview = false;
+        //        string activeInterviewStatus = null;
+        //        string? activeJobType = null;
+        //        var client = await _context.Clients.FirstOrDefaultAsync(c => c.ClientId == clientId);
+
+        //        if (client != null)
+        //        {
+        //            var activeInt = worker.Interviews.FirstOrDefault(i =>
+        //                i.ClientId == client.ClientId &&
+        //                i.WorkerDecision != "Rejected" &&
+        //                i.Status != "Rejected" &&
+        //                i.Status != "Completed" &&
+        //                i.Status != "Terminated" &&
+        //                !(i.JobType == "Part-Time" && (i.Status == "Finalized" || i.Status == "Hired"))
+        //            );
+        //            hasActiveInterview = activeInt != null;
+        //            activeInterviewStatus = activeInt?.Status;
+        //            activeJobType = activeInt != null ? (activeInt.JobType ?? "Full-Time") : null;
+        //        }
+
+        //        // --- HAVERSINE RADIUS DISTANCE CALCULATION ---
+        //        bool isWithinRadius = false;
+        //        double distanceKm = 0;
+        //        double workerRadius = worker.Radius > 0 ? worker.Radius : 5.0;
+
+        //        if (client != null &&
+        //            worker.Latitude.HasValue && worker.Longitude.HasValue &&
+        //            client.Latitude.HasValue && client.Longitude.HasValue)
+        //        {
+        //            double workerLat = Convert.ToDouble(worker.Latitude.Value);
+        //            double workerLng = Convert.ToDouble(worker.Longitude.Value);
+        //            double clientLat = Convert.ToDouble(client.Latitude.Value);
+        //            double clientLng = Convert.ToDouble(client.Longitude.Value);
+
+        //            distanceKm = CalculateHaversineDistance(clientLat, clientLng, workerLat, workerLng);
+
+        //            // Fetch radius from worker (Default to 5 km if null or zero)
+        //            double workerRadius = worker.Radius > 0 ? worker.Radius : 5.0;
+
+        //            if (distanceKm <= workerRadius)
+        //            {
+        //                isWithinRadius = true;
+        //            }
+        //        }
+
+        //        // --- TIME SLOTS FETCHING (IF WITHIN RADIUS) ---
+        //        var timeSlots = new List<object>();
+        //        if (isWithinRadius)
+        //        {
+        //            var rawTimeSlots = await _context.WorkerTimeSlots
+        //                .Where(ts => ts.WorkerId == worker.WorkerId)
+        //                .ToListAsync();
+
+        //            timeSlots = rawTimeSlots.Select(ts => new
+        //            {
+        //                id = ts.Id,
+        //                startTime = ts.StartTime.ToString(@"hh\:mm"),
+        //                endTime = ts.EndTime.ToString(@"hh\:mm")
+        //            }).ToList<object>();
+        //        }
+
+        //        // Reviews processing
+        //        var allReviews = worker.Interviews
+        //            .SelectMany(i => i.Reviews
+        //                .Where(r => r.ReviewerRole == "Client")
+        //                .Select(r => new
+        //                {
+        //                    clientId = i.ClientId,
+        //                    reviewerName = i.Client?.Name ?? "Anonymous",
+        //                    rating = r.Rating,
+        //                    comment = r.Comment,
+        //                    date = r.ReviewDate?.ToString("MMM dd, yyyy") ?? "N/A"
+        //                }))
+        //            .ToList();
+
+        //        double avgRating = allReviews.Any() ? Math.Round(allReviews.Average(r => (double)(r.rating ?? 0)), 1) : 0.0;
+
+        //        int pendingRequestCount = worker.Interviews.Count(i => i.WorkerDecision == null || i.WorkerDecision == "Pending");
+        //        int jobNotificationCount = await _context.Hiring.CountAsync(h => h.Interview.WorkerId == worker.WorkerId && h.WorkerDecision == "Pending");
+        //        int terminationCount = worker.Interviews.Count(i => i.Status == "Terminated");
+
+        //        // Fetch junction skills
+        //        var junctionData = await _context.WorkerCategories
+        //            .Where(wc => wc.WorkerId == worker.WorkerId)
+        //            .ToListAsync();
+
+        //        var categories = await _context.Categories.ToListAsync();
+        //        var categoryLookup = categories
+        //            .GroupBy(c => c.CategoryId)
+        //            .ToDictionary(g => g.Key, g => g.First().CategoryName);
+
+        //        var skills = await _context.Skills.ToListAsync();
+        //        var skillLookup = skills
+        //            .GroupBy(s => s.SkillsId)
+        //            .ToDictionary(g => g.Key, g => g.First().SkillName);
+
+        //        var primarySkills = new List<string>();
+        //        var partTimeSkills = new List<object>();
+        //        string primaryCategoryName = null;
+        //        int? primaryCategoryId = null;
+
+        //        var partTimeGroups = new Dictionary<string, List<string>>();
+
+        //        foreach (var item in junctionData)
+        //        {
+        //            if (primaryCategoryId == null)
+        //            {
+        //                primaryCategoryId = item.CategoryId;
+        //                categoryLookup.TryGetValue(item.CategoryId, out primaryCategoryName);
+        //            }
+
+        //            if (item.CategoryId == primaryCategoryId)
+        //            {
+        //                if (skillLookup.TryGetValue(item.SkillsId, out var skillName))
+        //                {
+        //                    if (!primarySkills.Contains(skillName)) primarySkills.Add(skillName);
+        //                }
+        //            }
+        //            else
+        //            {
+        //                if (categoryLookup.TryGetValue(item.CategoryId, out var catName))
+        //                {
+        //                    if (!partTimeGroups.ContainsKey(catName)) partTimeGroups[catName] = new List<string>();
+        //                    if (skillLookup.TryGetValue(item.SkillsId, out var sName))
+        //                    {
+        //                        if (!partTimeGroups[catName].Contains(sName)) partTimeGroups[catName].Add(sName);
+        //                    }
+        //                }
+        //            }
+        //        }
+
+        //        foreach (var kvp in partTimeGroups)
+        //        {
+        //            partTimeSkills.Add(new { categoryName = kvp.Key, skills = kvp.Value });
+        //        }
+
+        //        var result = new
+        //        {
+        //            id = worker.WorkerId,
+        //            name = worker.Name,
+        //            picture = worker.Picture,
+        //            bio = worker.Bio ?? "Professional service provider committed to excellence and reliability.",
+        //            role = primaryCategoryName ?? "General Worker",
+        //            categoryId = primaryCategoryId,
+        //            location = worker.Address ?? "N/A",
+        //            salary = worker.Salary != null ? worker.Salary.ToString() : "Not Set",
+        //            gender = worker.Gender ?? "N/A",
+        //            availability = worker.AvailableStatus == true ? "Available 24/7" : "NOT AVAILABLE",
+        //            availableStatus = worker.AvailableStatus ?? false,
+        //            rating = avgRating.ToString("F1"),
+        //            reviewCount = allReviews.Count,
+        //            pendingRequestCount = pendingRequestCount,
+        //            jobNotificationCount = jobNotificationCount,
+        //            terminationCount = terminationCount,
+        //            hasActiveInterview = hasActiveInterview,
+        //            activeInterviewStatus = activeInterviewStatus,
+
+        //            // Distance & Part Time Radius Info
+        //            isPartTimeAvailable = isWithinRadius,
+        //            distanceKm = Math.Round(distanceKm, 2),
+        //            timeSlots = timeSlots,
+
+        //            primarySkills = primarySkills,
+        //            cnic = worker.Cnic,
+        //            phone = worker.Phone,
+        //            age = worker.Age,
+
+        //            rawExperiences = worker.Experiences.Select(e => new
+        //            {
+        //                CategoryId = e.CategoryId,
+        //                SkillsId = e.SkillsId,
+        //                WorkAt = e.WorkAt,
+        //                Duration = e.Duration,
+        //                ExpDetail = e.ExpDetail
+        //            }).ToList(),
+
+        //            experiences = worker.Experiences.Select(e => new
+        //            {
+        //                title = e.WorkAt ?? "Previous Role",
+        //                period = e.Duration ?? "N/A",
+        //                details = e.ExpDetail ?? ""
+        //            }).ToList(),
+        //            reviews = allReviews,
+        //            partTimeSkills = partTimeSkills
+        //        };
+
+        //        return Ok(result);
+        //    }
+        //    catch (Exception ex)
+        //    {
+        //        return StatusCode(500, new { message = "Error fetching worker details: " + ex.Message, detail = ex.ToString() });
+        //    }
+        //}
+
 
         // Helper: Haversine distance formula calculation
         private double CalculateHaversineDistance(double lat1, double lon1, double lat2, double lon2)
@@ -748,21 +979,39 @@ namespace Fyp_Backend.Controllers
                 if (worker == null)
                     return NotFound(new { message = "Worker not found" });
 
+                //var clientReviews = worker.Interviews
+                //    .SelectMany(i => i.Reviews
+                //        .Where(r => r.ReviewerRole == "Client")
+                //        .Select(r => new
+                //        {
+                //            id = r.ReviewId.ToString(),
+                //            clientId = i.ClientId, // Ensure ClientId is cleanly passed here
+                //            name = i.Client != null ? i.Client.Name : "Client",
+                //            rating = r.Rating ?? 0,
+                //            comment = r.Comment ?? "",
+                //            date = r.ReviewDate?.ToString("MMM dd, yyyy") ?? "N/A",
+                //            duration = "Previous Client"
+                //        }))
+                //    .OrderByDescending(r => r.id)
+                //    .ToList();
                 var clientReviews = worker.Interviews
-                    .SelectMany(i => i.Reviews
-                        .Where(r => r.ReviewerRole == "Client")
-                        .Select(r => new
-                        {
-                            id = r.ReviewId.ToString(),
-                            clientId = i.ClientId, // Ensure ClientId is cleanly passed here
-                            name = i.Client != null ? i.Client.Name : "Client",
-                            rating = r.Rating ?? 0,
-                            comment = r.Comment ?? "",
-                            date = r.ReviewDate?.ToString("MMM dd, yyyy") ?? "N/A",
-                            duration = "Previous Client"
-                        }))
-                    .OrderByDescending(r => r.id)
-                    .ToList();
+    .SelectMany(i => i.Reviews
+        .Where(r => r.ReviewerRole == "Client")
+        // FIXED: was `.OrderByDescending(r => r.id)` on the string id, so
+        // "9" sorted after "10". Newest review is now genuinely first.
+        .OrderByDescending(r => r.ReviewDate)
+        .ThenByDescending(r => r.ReviewId)
+        .Select(r => new
+        {
+            id = r.ReviewId.ToString(),
+            clientId = i.ClientId,
+            name = i.Client != null ? i.Client.Name : "Client",
+            rating = r.Rating ?? 0,
+            comment = r.Comment ?? "",
+            date = r.ReviewDate?.ToString("MMM dd, yyyy") ?? "N/A",
+            duration = "Previous Client"
+        }))
+    .ToList();
 
                 double avgRating = clientReviews.Any() ? Math.Round(clientReviews.Average(r => (double)r.rating), 1) : 0.0;
 
@@ -850,28 +1099,124 @@ namespace Fyp_Backend.Controllers
         {
             try
             {
+                // ─── 1. The client always comes from the JWT, never from the body ──
                 var userIdStr = User.FindFirst(ClaimTypes.NameIdentifier)?.Value
                              ?? User.FindFirst(System.IdentityModel.Tokens.Jwt.JwtRegisteredClaimNames.Sub)?.Value;
 
-                if (string.IsNullOrEmpty(userIdStr))
+                // TryParse instead of Parse: a malformed claim must not turn into a 500
+                if (string.IsNullOrEmpty(userIdStr) || !int.TryParse(userIdStr, out int clientId))
                     return Unauthorized(new { message = "Invalid user session." });
 
-                model.ClientId = int.Parse(userIdStr);
+                model.ClientId = clientId;
 
-                // Rule 1a: when user books interview, both status and workerDecision should be pending
+                // ─── 2. Load both sides once — they are needed for the job type ────
+                var bookingClient = await _context.Clients.FindAsync(clientId);
+                if (bookingClient == null)
+                    return BadRequest(new { message = "Client profile not found." });
+
+                if (model.WorkerId == null)
+                    return BadRequest(new { message = "Worker is required." });
+
+                var bookingWorker = await _context.Workers.FindAsync(model.WorkerId.Value);
+                if (bookingWorker == null)
+                    return BadRequest(new { message = "Worker not found." });
+
+                // ─── 3. Stop duplicate in-flight requests to the same worker ────────
+                // Optional guard: delete this block if you want one client to be able
+                // to send several parallel pending requests to the same worker.
+                bool alreadyPending = await _context.Interviews.AnyAsync(i =>
+                    i.ClientId == clientId &&
+                    i.WorkerId == model.WorkerId &&
+                    (i.Status == "Pending" || i.Status == "Approved"));
+
+                if (alreadyPending)
+                    return BadRequest(new { message = "You already have an active request with this worker." });
+
+                // ─── 4. Rule 1a: both status and workerDecision are pending ─────────
                 model.Status = "Pending";
                 model.WorkerDecision = "Pending";
+
+                // ─── 5. JOB TYPE (PART-TIME / FULL-TIME) — decided by the server ────
+                // Part-Time  = client is inside the worker's own radius (Worker.Radius)
+                // Full-Time  = outside it, or the distance cannot be computed
+                //              (missing coordinates -> Full-Time, the safe default)
+                // Stored once here and never recalculated, so the whole interview +
+                // hiring flow keeps showing the same type on both sides.
+                // Any JobType the app might send is deliberately overwritten here.
+                model.JobType = ClassifyJobType(bookingClient, bookingWorker);
+                // ────────────────────────────────────────────────────────────────────
+
+                // ─── 6. Address fallback so the worker's card never shows "N/A" ─────
+                if (string.IsNullOrWhiteSpace(model.Address))
+                    model.Address = bookingClient.Address;
 
                 _context.Interviews.Add(model);
                 await _context.SaveChangesAsync();
 
-                return Ok(new { message = "Interview booked successfully!" });
+                // Echo the created id + the frozen type back to the app
+                return Ok(new
+                {
+                    message = $"{model.JobType} interview request booked successfully!",
+                    interviewId = model.InterviewId,
+                    jobType = model.JobType,
+                    status = model.Status,
+                    workerDecision = model.WorkerDecision
+                });
             }
             catch (Exception ex)
             {
                 return StatusCode(500, new { message = "Error booking interview: " + ex.Message });
             }
         }
+
+        // ── helper used above (keep it next to CalculateHaversineDistance) ──
+        /// <summary>
+        /// Decides whether a booking is Part-Time or Full-Time.
+        /// Part-Time means the client is inside the worker's saved radius.
+        /// Anything we cannot prove (missing coordinates, no worker) is Full-Time.
+        /// </summary>
+        private string ClassifyJobType(Client? client, Worker? worker)
+        {
+            if (client?.Latitude == null || client?.Longitude == null ||
+                worker?.Latitude == null || worker?.Longitude == null)
+            {
+                return "Full-Time";
+            }
+
+            double distanceKm = CalculateHaversineDistance(
+                Convert.ToDouble(client.Latitude.Value), Convert.ToDouble(client.Longitude.Value),
+                Convert.ToDouble(worker.Latitude.Value), Convert.ToDouble(worker.Longitude.Value));
+
+            double workerRadius = worker.Radius > 0 ? worker.Radius : 5.0;
+
+            return distanceKm <= workerRadius ? "Part-Time" : "Full-Time";
+        }
+        //public async Task<IActionResult> BookInterview([FromBody] Interview model)
+        //{
+        //    try
+        //    {
+        //        var userIdStr = User.FindFirst(ClaimTypes.NameIdentifier)?.Value
+        //                     ?? User.FindFirst(System.IdentityModel.Tokens.Jwt.JwtRegisteredClaimNames.Sub)?.Value;
+
+        //        if (string.IsNullOrEmpty(userIdStr))
+        //            return Unauthorized(new { message = "Invalid user session." });
+
+        //        model.ClientId = int.Parse(userIdStr);
+
+        //        // Rule 1a: when user books interview, both status and workerDecision should be pending
+        //        model.Status = "Pending";
+        //        model.WorkerDecision = "Pending";
+
+        //        _context.Interviews.Add(model);
+        //        await _context.SaveChangesAsync();
+
+        //        return Ok(new { message = "Interview booked successfully!" });
+        //    }
+        //    catch (Exception ex)
+        //    {
+        //        return StatusCode(500, new { message = "Error booking interview: " + ex.Message });
+        //    }
+        //}
 
         [HttpGet("GetClientDashboard")]
         public async Task<IActionResult> GetClientDashboard()
@@ -914,6 +1259,7 @@ namespace Fyp_Backend.Controllers
                             .FirstOrDefault() ?? "Worker",
                         location = h.Address ?? h.Interview.Address,
                         picture = h.Interview.Worker.Picture,
+                        jobType = h.Interview.JobType ?? "Full-Time",
                         date = h.HiringDate != null ? h.HiringDate.Value.ToString("yyyy-MM-dd") : "",
                         status = h.Interview!.Status == "ResignationPending" ? "Pending Resignation"
                                 : h.Interview!.Status == "Resigned" ? "Resigned"
@@ -1030,6 +1376,7 @@ namespace Fyp_Backend.Controllers
                         timeRaw = i.InterviewDate,
                         time = i.InterviewDate != null ? i.InterviewDate.Value.ToString("MMM dd, hh:mm tt") : "Not Set",
                         service = "Interview Request",
+                        jobType = i.JobType ?? "Full-Time",
                         clientPhone = i.Client != null ? i.Client.Phone : "N/A",
                         clientPicture = i.Client != null ? i.Client.Picture : null,
                         clientRating = i.Client != null ? (_context.Reviews.Any(r => r.Interview!.ClientId == i.ClientId && r.ReviewerRole == "Worker") 
@@ -1071,6 +1418,7 @@ namespace Fyp_Backend.Controllers
                         timeRaw = i.InterviewDate,
                         time = i.InterviewDate != null ? i.InterviewDate.Value.ToString("MMM dd, hh:mm tt") : "Not Set",
                         service = "Interview Request",
+                        jobType = i.JobType ?? "Full-Time",
                         clientPhone = i.Client != null ? i.Client.Phone : "N/A",
                         clientPicture = i.Client != null ? i.Client.Picture : null,
                         clientRating = i.Client != null ? (_context.Reviews.Any(r => r.Interview!.ClientId == i.ClientId && r.ReviewerRole == "Worker") 
@@ -1154,6 +1502,7 @@ namespace Fyp_Backend.Controllers
                         address = h.Address ?? "Pending",
                         hiringDecision = h.HiringDecision ?? "Pending",
                         workerDecision = h.WorkerDecision ?? "Pending",
+                        jobType = h.Interview.JobType ?? "Full-Time",
                         clientImage = h.Interview.Client != null ? h.Interview.Client.Picture : null,
                         clientRating = h.Interview.Client != null ? (_context.Reviews.Any(r => r.Interview!.ClientId == h.Interview.ClientId && r.ReviewerRole == "Worker") 
                             ? Math.Round(_context.Reviews.Where(r => r.Interview!.ClientId == h.Interview.ClientId && r.ReviewerRole == "Worker").Average(r => (double)r.Rating!), 1) 
@@ -1342,6 +1691,7 @@ namespace Fyp_Backend.Controllers
                         // Track state rules from the Hiring table row now
                         WorkerDecision = h.WorkerDecision, // "Pending", "Accepted", "Rejected"
                         HiringDecision = h.HiringDecision, // "Pending", "Accepted" etc.
+                        JobType = h.Interview!.JobType ?? "Full-Time",
                         Address = h.Address,
                         HiringDate = h.HiringDate
                     })
@@ -1801,7 +2151,8 @@ namespace Fyp_Backend.Controllers
                         workerSkill = _context.WorkerCategories.Where(wc => wc.WorkerId == i.WorkerId)
                                                               .Join(_context.Categories, wc => wc.CategoryId, c => c.CategoryId, (wc, c) => c.CategoryName)
                                                               .FirstOrDefault() ?? "Worker",
-                        status = i.Status
+                        status = i.Status,
+                        jobType = i.JobType ?? "Full-Time"
                     })
                     .ToListAsync();
 

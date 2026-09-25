@@ -21,6 +21,8 @@ public partial class Interview
 
     public virtual Client? Client { get; set; }
 
+    public string? JobType { get; set; }
+
     public virtual ICollection<Resignation> Resignations { get; set; } = new List<Resignation>();
 
     public virtual ICollection<Review> Reviews { get; set; } = new List<Review>();

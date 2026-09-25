@@ -103,6 +103,7 @@ public partial class Fyp1Context : DbContext
             entity.Property(e => e.InterviewDate).HasColumnType("datetime").HasColumnName("Interview_Date");
             entity.Property(e => e.Status).HasMaxLength(50).IsUnicode(false);
             entity.Property(e => e.WorkerId).HasColumnName("Worker_ID");
+            entity.Property(e => e.JobType).HasMaxLength(20).IsUnicode(false);
 
             entity.HasOne(d => d.Client).WithMany(p => p.Interviews)
                 .HasForeignKey(d => d.ClientId)
