@@ -27,6 +27,8 @@ public partial class Interview
     // (client inside the worker's radius). NULL = full-time booking / old rows.
     public int? SlotId { get; set; }
 
+    public bool? IsResidenceProvided { get; set; }
+
     public virtual ICollection<Resignation> Resignations { get; set; } = new List<Resignation>();
 
     public virtual ICollection<Review> Reviews { get; set; } = new List<Review>();

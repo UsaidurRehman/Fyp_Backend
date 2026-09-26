@@ -1421,6 +1421,7 @@ namespace Fyp_Backend.Controllers
                 //         block and keep SlotId = NULL (behaviour unchanged).
                 if (model.JobType == "Part-Time")
                 {
+                    model.IsResidenceProvided = false;
                     if (model.InterviewDate == null)
                         return BadRequest(new { message = "Interview date is required." });
 
@@ -1451,6 +1452,7 @@ namespace Fyp_Backend.Controllers
                 else
                 {
                     model.SlotId = null;
+                    model.IsResidenceProvided = model.IsResidenceProvided ?? false;
                 }
                 // ────────────────────────────────────────────────────────────────────
 
