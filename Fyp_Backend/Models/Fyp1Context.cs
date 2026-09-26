@@ -36,6 +36,10 @@ public partial class Fyp1Context : DbContext
     // Updated naming to match standard conventions
     public virtual DbSet<WorkerCategory> WorkerCategories { get; set; }
 
+    public virtual DbSet<Habit> Habits { get; set; }
+
+    public virtual DbSet<WorkerHabits> WorkerHabits { get; set; }
+
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
         modelBuilder.Entity<Category>(entity =>
@@ -60,6 +64,10 @@ public partial class Fyp1Context : DbContext
             entity.Property(e => e.WorkerId).HasColumnName("Worker_ID");
             entity.Property(e => e.CategoryId).HasColumnName("Category_ID");
             entity.Property(e => e.SkillsId).HasColumnName("Skills_ID");
+
+            entity.HasOne<Worker>()
+                .WithMany()
+                .HasForeignKey(e => e.WorkerId);
         });
 
         modelBuilder.Entity<Client>(entity =>
@@ -104,6 +112,15 @@ public partial class Fyp1Context : DbContext
             entity.Property(e => e.Status).HasMaxLength(50).IsUnicode(false);
             entity.Property(e => e.WorkerId).HasColumnName("Worker_ID");
             entity.Property(e => e.JobType).HasMaxLength(20).IsUnicode(false);
+            entity.Property(e => e.SlotId).HasColumnName("SlotId");
+
+            // Optional link to the picked time slot. SetNull matches the
+            // ON DELETE SET NULL foreign key created by Add_SlotId_To_Interview.sql,
+            // so deleting a slot never breaks an existing interview.
+            entity.HasOne(d => d.Slot)
+                .WithMany()
+                .HasForeignKey(d => d.SlotId)
+                .OnDelete(DeleteBehavior.SetNull);
 
             entity.HasOne(d => d.Client).WithMany(p => p.Interviews)
                 .HasForeignKey(d => d.ClientId)
@@ -315,6 +332,37 @@ public partial class Fyp1Context : DbContext
                 .WithMany()
                 .HasForeignKey(e => e.WorkerId)
                 .OnDelete(DeleteBehavior.Cascade);
+        });
+
+        // ── Habits (master list + which habits a worker picked) ──
+        modelBuilder.Entity<Habit>(entity =>
+        {
+            entity.ToTable("Habits");
+            entity.HasKey(e => e.HabitId);
+
+            entity.Property(e => e.Name).HasMaxLength(60).IsRequired();
+            entity.HasIndex(e => e.Name).IsUnique();
+        });
+
+        modelBuilder.Entity<WorkerHabits>(entity =>
+        {
+            entity.ToTable("WorkerHabits");
+            entity.HasKey(e => e.WorkerHabitId);
+
+            entity.Property(e => e.CreatedDate).HasColumnType("datetime");
+
+            // A worker can select a habit once.
+            entity.HasIndex(e => new { e.WorkerId, e.HabitId }).IsUnique();
+
+            entity.HasOne(e => e.Worker)
+                .WithMany(w => w.WorkerHabits)
+                .HasForeignKey(e => e.WorkerId)
+                .OnDelete(DeleteBehavior.Cascade);
+
+            entity.HasOne(e => e.Habit)
+                .WithMany(h => h.WorkerHabits)
+                .HasForeignKey(e => e.HabitId)
+                .OnDelete(DeleteBehavior.Restrict);
         });
 
         OnModelCreatingPartial(modelBuilder);

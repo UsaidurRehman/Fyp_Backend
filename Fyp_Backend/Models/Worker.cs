@@ -24,8 +24,10 @@ public partial class Worker
     public decimal? Latitude { get; set; }
     public decimal? Longitude { get; set; }
     public int Radius { get; set; } = 5;
-    
+
     public virtual ICollection<Experience> Experiences { get; set; } = new List<Experience>();
+
+    public virtual ICollection<WorkerHabits> WorkerHabits { get; set; } = new List<WorkerHabits>();
 
     public virtual ICollection<Interview> Interviews { get; set; } = new List<Interview>();
 }

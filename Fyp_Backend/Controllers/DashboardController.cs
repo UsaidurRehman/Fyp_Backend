@@ -211,7 +211,8 @@ namespace Fyp_Backend.Controllers
     [FromQuery] string? search = null,
     [FromQuery] string? gender = null,
     [FromQuery] string? city = null,
-    [FromQuery] List<string>? subSkills = null)
+    [FromQuery] List<string>? subSkills = null,
+    [FromQuery] List<int>? habitIds = null)
         {
             try
             {
@@ -265,6 +266,18 @@ namespace Fyp_Backend.Controllers
                     {
                         query = query.Where(w => _context.WorkerCategories
                             .Any(wc => wc.WorkerId == w.WorkerId && _context.Skills.Any(s => s.SkillsId == wc.SkillsId && s.SkillName == skillName)));
+                    }
+                }
+
+                // Habits filter — AND logic like sub-skills: a worker must hold
+                // every habit the client ticked.
+                if (habitIds != null && habitIds.Any())
+                {
+                    foreach (var habitId in habitIds.Where(id => id > 0).Distinct())
+                    {
+                        int wantedHabitId = habitId;
+                        query = query.Where(w => _context.WorkerHabits
+                            .Any(wh => wh.WorkerId == w.WorkerId && wh.HabitId == wantedHabitId));
                     }
                 }
 
@@ -423,15 +436,48 @@ namespace Fyp_Backend.Controllers
                         .Where(r => r.ReviewerRole == "Client")
                         .Select(r => new
                         {
+                            interviewId = i.InterviewId,
                             clientId = i.ClientId,
                             reviewerName = i.Client?.Name ?? "Anonymous",
                             rating = r.Rating,
                             comment = r.Comment,
-                            date = r.ReviewDate?.ToString("MMM dd, yyyy") ?? "N/A"
+                            date = r.ReviewDate?.ToString("MMM dd, yyyy") ?? "N/A",
+                            reviewDateRaw = r.ReviewDate
                         }))
                     .ToList();
 
-                double avgRating = allReviews.Any() ? Math.Round(allReviews.Average(r => (double)(r.rating ?? 0)), 1) : 0.0;
+                // Attach the worked period (Hiring_Date -> Termination / Resignation date).
+                var detailReviewWindows = await LoadContractWindowsAsync(
+                    allReviews.Select(r => r.interviewId).Distinct().ToList(),
+                    allReviews.GroupBy(r => r.interviewId).ToDictionary(g => g.Key, g => g.Max(r => r.reviewDateRaw)));
+
+                var allReviewsPayload = allReviews.Select(r =>
+                {
+                    detailReviewWindows.TryGetValue(r.interviewId, out var window);
+                    return new
+                    {
+                        r.clientId,
+                        r.reviewerName,
+                        r.rating,
+                        r.comment,
+                        r.date,
+                        workedFrom = window.From?.ToString("yyyy-MM-dd"),
+                        workedTo = window.To?.ToString("yyyy-MM-dd"),
+                        workedPeriod = FormatWorkedPeriod(window.From, window.To)
+                    };
+                }).ToList();
+
+                double avgRating = allReviewsPayload.Any() ? Math.Round(allReviewsPayload.Average(r => (double)(r.rating ?? 0)), 1) : 0.0;
+
+                // Habits the worker selected at signup (or later). Drives the
+                // "Habits" tab on their profile and the pre-ticked checkbox list in
+                // both the edit-profile form and the My Habits screen.
+                var workerHabits = await _context.WorkerHabits
+                    .Where(wh => wh.WorkerId == worker.WorkerId && wh.Habit != null && wh.Habit.IsActive)
+                    .OrderBy(wh => wh.Habit!.SortOrder)
+                    .ThenBy(wh => wh.Habit!.Name)
+                    .Select(wh => new { id = wh.Habit!.HabitId, name = wh.Habit!.Name })
+                    .ToListAsync();
 
                 int pendingRequestCount = worker.Interviews.Count(i => i.WorkerDecision == null || i.WorkerDecision == "Pending");
                 int jobNotificationCount = await _context.Hiring.CountAsync(h => h.Interview.WorkerId == worker.WorkerId && h.WorkerDecision == "Pending");
@@ -541,7 +587,8 @@ namespace Fyp_Backend.Controllers
                         period = e.Duration ?? "N/A",
                         details = e.ExpDetail ?? ""
                     }).ToList(),
-                    reviews = allReviews,
+                    reviews = allReviewsPayload,
+                    habits = workerHabits,
                     partTimeSkills = partTimeSkills
                 };
 
@@ -552,6 +599,106 @@ namespace Fyp_Backend.Controllers
                 return StatusCode(500, new { message = "Error fetching worker details: " + ex.Message, detail = ex.ToString() });
             }
         }
+        // ═══════════════════════════════════════════════════════════════════════════
+        //  GetWorkerAvailableSlots/{workerId}?date=yyyy-MM-dd
+        //  Used by InterviewSelectionScreen (part-time bookings) to show the
+        //  worker's time slots for the chosen day, marking the ones already taken.
+        //  Also returns the authoritative Part-Time / Full-Time verdict for this
+        //  client+worker pair, so the app never has to guess.
+        // ═══════════════════════════════════════════════════════════════════════════
+        [HttpGet("GetWorkerAvailableSlots/{workerId}")]
+        public async Task<IActionResult> GetWorkerAvailableSlots(int workerId, [FromQuery] string? date = null)
+        {
+            try
+            {
+                var worker = await _context.Workers.FindAsync(workerId);
+                if (worker == null)
+                    return NotFound(new { message = "Worker not found." });
+
+                // --- who is asking (JWT first, query fallback) ---
+                var userIdStr = User.FindFirst(ClaimTypes.NameIdentifier)?.Value
+                             ?? User.FindFirst(System.IdentityModel.Tokens.Jwt.JwtRegisteredClaimNames.Sub)?.Value;
+
+                int clientId = 0;
+                if (!string.IsNullOrEmpty(userIdStr))
+                {
+                    int.TryParse(userIdStr, out clientId);
+                }
+
+                var client = clientId > 0 ? await _context.Clients.FindAsync(clientId) : null;
+
+                // --- the same verdict BookInterview will freeze later ---
+                bool isPartTime = ClassifyJobType(client, worker) == "Part-Time";
+
+                double workerRadius = worker.Radius > 0 ? worker.Radius : 5.0;
+                double distanceKm = 0;
+
+                if (client != null &&
+                    worker.Latitude.HasValue && worker.Longitude.HasValue &&
+                    client.Latitude.HasValue && client.Longitude.HasValue)
+                {
+                    distanceKm = CalculateHaversineDistance(
+                        Convert.ToDouble(client.Latitude.Value), Convert.ToDouble(client.Longitude.Value),
+                        Convert.ToDouble(worker.Latitude.Value), Convert.ToDouble(worker.Longitude.Value));
+                }
+
+                // --- which day are we looking at ---
+                DateTime day = DateTime.Today;
+                if (!string.IsNullOrWhiteSpace(date) && DateTime.TryParse(date, out var parsed))
+                {
+                    day = parsed.Date;
+                }
+
+                var dayStart = day;
+                var dayEnd = day.AddDays(1);
+
+                // --- the worker's recurring daily slots ---
+                var rawSlots = await _context.WorkerTimeSlots
+                    .Where(s => s.WorkerId == workerId)
+                    .OrderBy(s => s.StartTime)
+                    .ToListAsync();
+
+                // --- slots already reserved on that day ---
+                // A slot is consumed for a given (worker + date). Other dates of the
+                // same slot stay open. Dead statuses do not block anything.
+                var bookedSlotIds = await _context.Interviews
+                    .Where(i => i.WorkerId == workerId &&
+                                i.SlotId != null &&
+                                i.InterviewDate != null &&
+                                i.InterviewDate >= dayStart && i.InterviewDate < dayEnd &&
+                                i.Status != "Rejected" &&
+                                i.Status != "JobRejected" &&
+                                i.Status != "Terminated" &&
+                                i.Status != "Resigned" &&
+                                i.Status != "Completed")
+                    .Select(i => i.SlotId!.Value)
+                    .ToListAsync();
+
+                var slots = rawSlots.Select(s => new
+                {
+                    id = s.Id,
+                    startTime = s.StartTime.ToString(@"hh\:mm"),
+                    endTime = s.EndTime.ToString(@"hh\:mm"),
+                    isTaken = bookedSlotIds.Contains(s.Id)
+                });
+
+                return Ok(new
+                {
+                    workerId = workerId,
+                    date = day.ToString("yyyy-MM-dd"),
+                    isPartTimeAvailable = isPartTime,
+                    radius = workerRadius,
+                    distanceKm = Math.Round(distanceKm, 2),
+                    hasSlots = rawSlots.Any(),
+                    slots = slots
+                });
+            }
+            catch (Exception ex)
+            {
+                return StatusCode(500, new { message = "Error fetching worker slots: " + ex.Message });
+            }
+        }
+
         //public async Task<IActionResult> GetWorkerDetail(int id, [FromQuery] int? clientIdParam = null)
         //{
         //    try
@@ -792,6 +939,104 @@ namespace Fyp_Backend.Controllers
         }
 
         private double ToRadians(double val) => (Math.PI / 180.0) * val;
+
+        // ---------- Contract lifetime helpers (the "Worked: ..." line on review cards) ----------
+
+        // "23 May – 22 Jun 2025"  — the year is repeated on both ends only when it differs.
+        private static string? FormatWorkedSpan(DateTime? from, DateTime? to)
+        {
+            if (from == null || to == null) return null;
+            var f = from.Value.Date;
+            var t = to.Value.Date;
+            if (t < f) t = f;
+            // \u2013 is the en dash — escaped so the separator survives any
+            // source-file encoding the publish pipeline may assume.
+            return f.Year == t.Year
+                ? $"{f:dd MMM} \u2013 {t:dd MMM yyyy}"
+                : $"{f:dd MMM yyyy} \u2013 {t:dd MMM yyyy}";
+        }
+
+        // "23 May – 22 Jun 2025 (30 days)"
+        private static string? FormatWorkedPeriod(DateTime? from, DateTime? to)
+        {
+            var span = FormatWorkedSpan(from, to);
+            if (span == null || from == null || to == null) return null;
+            var days = (to.Value.Date - from.Value.Date).Days;
+            if (days < 0) days = 0;
+            return span + (days <= 1 ? " (1 day)" : $" ({days} days)");
+        }
+
+        // One extra round trip for every interview currently on screen:
+        //   start = Hiring.Hiring_Date        (falls back to Interview.InterviewDate)
+        //   end   = Termination.TerminatedDate, else Resignation.LastWorkingDate
+        //           (falls back to Resignation.SubmittedDate, then the review date)
+        private async Task<Dictionary<int, (DateTime? From, DateTime? To)>> LoadContractWindowsAsync(
+            List<int> interviewIds, Dictionary<int, DateTime?> fallbackEndDates)
+        {
+            var windows = new Dictionary<int, (DateTime? From, DateTime? To)>();
+            if (interviewIds == null || interviewIds.Count == 0) return windows;
+
+            var hireDates = (await _context.Hiring
+                .Where(h => h.InterviewId != null && interviewIds.Contains(h.InterviewId.Value))
+                .Select(h => new { InterviewId = h.InterviewId!.Value, h.HiringDate })
+                .ToListAsync())
+                .GroupBy(x => x.InterviewId)
+                .ToDictionary(g => g.Key, g => g.Min(x => x.HiringDate));
+
+            var interviewDates = (await _context.Interviews
+                .Where(i => interviewIds.Contains(i.InterviewId))
+                .Select(i => new { i.InterviewId, i.InterviewDate })
+                .ToListAsync())
+                .ToDictionary(x => x.InterviewId, x => x.InterviewDate);
+
+            var resignations = await _context.Resignations
+                .Where(r => r.InterviewId != null && interviewIds.Contains(r.InterviewId.Value))
+                .Select(r => new { InterviewId = r.InterviewId!.Value, r.SubmittedDate, r.LastWorkingDate })
+                .ToListAsync();
+
+            var terminations = await _context.Terminations
+                .Where(t => t.InterviewId != null && interviewIds.Contains(t.InterviewId.Value))
+                .Select(t => new { InterviewId = t.InterviewId!.Value, t.TerminatedDate })
+                .ToListAsync();
+
+            foreach (var id in interviewIds.Distinct())
+            {
+                DateTime? from = hireDates.TryGetValue(id, out var hireDate) ? hireDate : null;
+                if (from == null && interviewDates.TryGetValue(id, out var interviewDate)) from = interviewDate;
+
+                DateTime? to = null;
+
+                var termination = terminations
+                    .Where(t => t.InterviewId == id && t.TerminatedDate != null)
+                    .OrderByDescending(t => t.TerminatedDate)
+                    .FirstOrDefault();
+                if (termination != null)
+                {
+                    to = termination.TerminatedDate!.Value.ToDateTime(TimeOnly.MinValue);
+                }
+                else
+                {
+                    var resignation = resignations
+                        .Where(r => r.InterviewId == id)
+                        .OrderByDescending(r => r.SubmittedDate)
+                        .FirstOrDefault();
+                    if (resignation != null)
+                    {
+                        to = resignation.LastWorkingDate != default
+                            ? resignation.LastWorkingDate.ToDateTime(TimeOnly.MinValue)
+                            : resignation.SubmittedDate;
+                    }
+                }
+
+                if (to == null && fallbackEndDates != null && fallbackEndDates.TryGetValue(id, out var reviewDate))
+                    to = reviewDate;
+
+                if (from != null || to != null) windows[id] = (from, to);
+            }
+
+            return windows;
+        }
+
         //    [HttpGet("GetWorkerDetail/{id}")]
         //    public async Task<IActionResult> GetWorkerDetail(int id)
         //    {
@@ -995,31 +1240,56 @@ namespace Fyp_Backend.Controllers
                 //    .OrderByDescending(r => r.id)
                 //    .ToList();
                 var clientReviews = worker.Interviews
-    .SelectMany(i => i.Reviews
-        .Where(r => r.ReviewerRole == "Client")
-        // FIXED: was `.OrderByDescending(r => r.id)` on the string id, so
-        // "9" sorted after "10". Newest review is now genuinely first.
-        .OrderByDescending(r => r.ReviewDate)
-        .ThenByDescending(r => r.ReviewId)
-        .Select(r => new
-        {
-            id = r.ReviewId.ToString(),
-            clientId = i.ClientId,
-            name = i.Client != null ? i.Client.Name : "Client",
-            rating = r.Rating ?? 0,
-            comment = r.Comment ?? "",
-            date = r.ReviewDate?.ToString("MMM dd, yyyy") ?? "N/A",
-            duration = "Previous Client"
-        }))
-    .ToList();
+                    .SelectMany(i => i.Reviews
+                        .Where(r => r.ReviewerRole == "Client")
+                        // Order on the real columns: the old string sort on the projected id put
+                        // "9" after "10". Each row now also carries its contract window.
+                        .OrderByDescending(r => r.ReviewDate)
+                        .ThenByDescending(r => r.ReviewId)
+                        .Select(r => new
+                        {
+                            id = r.ReviewId.ToString(),
+                            interviewId = i.InterviewId,
+                            clientId = i.ClientId,
+                            name = i.Client != null ? i.Client.Name : "Client",
+                            rating = r.Rating ?? 0,
+                            comment = r.Comment ?? "",
+                            date = r.ReviewDate?.ToString("MMM dd, yyyy") ?? "N/A",
+                            reviewDateRaw = r.ReviewDate
+                        }))
+                    .ToList();
 
-                double avgRating = clientReviews.Any() ? Math.Round(clientReviews.Average(r => (double)r.rating), 1) : 0.0;
+                // Worked period on every review: Hiring_Date -> Termination / Resignation date.
+                var workerReviewWindows = await LoadContractWindowsAsync(
+                    clientReviews.Select(r => r.interviewId).Distinct().ToList(),
+                    clientReviews.GroupBy(r => r.interviewId).ToDictionary(g => g.Key, g => g.Max(r => r.reviewDateRaw)));
+
+                var reviewPayload = clientReviews.Select(r =>
+                {
+                    workerReviewWindows.TryGetValue(r.interviewId, out var window);
+                    return new
+                    {
+                        r.id,
+                        r.clientId,
+                        r.name,
+                        r.rating,
+                        r.comment,
+                        r.date,
+                        workedFrom = window.From?.ToString("yyyy-MM-dd"),
+                        workedTo = window.To?.ToString("yyyy-MM-dd"),
+                        workedPeriod = FormatWorkedPeriod(window.From, window.To),
+                        // short span, kept for the worker dashboard's "date · span" chip
+                        duration = FormatWorkedSpan(window.From, window.To)
+                    };
+                }).ToList();
+
+                double avgRating = reviewPayload.Any() ? Math.Round(reviewPayload.Average(r => (double)r.rating), 1) : 0.0;
 
                 return Ok(new
                 {
                     averageRating = avgRating,
-                    reviewCount = clientReviews.Count,
-                    reviews = clientReviews
+                    reviewCount = reviewPayload.Count,
+                    reviews = reviewPayload
                 });
             }
             catch (Exception ex)
@@ -1144,6 +1414,44 @@ namespace Fyp_Backend.Controllers
                 // hiring flow keeps showing the same type on both sides.
                 // Any JobType the app might send is deliberately overwritten here.
                 model.JobType = ClassifyJobType(bookingClient, bookingWorker);
+
+                // ─── 5b. PART-TIME ONLY: the client must pick one of the worker's ───
+                //         published time slots, and that slot must still be free
+                //         for the chosen day. Full-time bookings never reach this
+                //         block and keep SlotId = NULL (behaviour unchanged).
+                if (model.JobType == "Part-Time")
+                {
+                    if (model.InterviewDate == null)
+                        return BadRequest(new { message = "Interview date is required." });
+
+                    if (model.SlotId == null)
+                        return BadRequest(new { message = "Please select one of the worker's time slots." });
+
+                    var chosenSlot = await _context.WorkerTimeSlots.FindAsync(model.SlotId.Value);
+                    if (chosenSlot == null || chosenSlot.WorkerId != bookingWorker.WorkerId)
+                        return BadRequest(new { message = "That time slot does not belong to this worker." });
+
+                    var dayStart = model.InterviewDate.Value.Date;
+                    var dayEnd = dayStart.AddDays(1);
+
+                    bool slotTaken = await _context.Interviews.AnyAsync(i =>
+                        i.WorkerId == bookingWorker.WorkerId &&
+                        i.SlotId == model.SlotId &&
+                        i.InterviewDate != null &&
+                        i.InterviewDate >= dayStart && i.InterviewDate < dayEnd &&
+                        i.Status != "Rejected" &&
+                        i.Status != "JobRejected" &&
+                        i.Status != "Terminated" &&
+                        i.Status != "Resigned" &&
+                        i.Status != "Completed");
+
+                    if (slotTaken)
+                        return BadRequest(new { message = "That time slot is already booked for this date. Please pick another one." });
+                }
+                else
+                {
+                    model.SlotId = null;
+                }
                 // ────────────────────────────────────────────────────────────────────
 
                 // ─── 6. Address fallback so the worker's card never shows "N/A" ─────
@@ -1153,12 +1461,44 @@ namespace Fyp_Backend.Controllers
                 _context.Interviews.Add(model);
                 await _context.SaveChangesAsync();
 
+                // ─── 5c. Race guard for the picked slot ──────────────────────────────
+                // Two clients can tap the same slot within the same second: both pass
+                // the check above, both insert. The row inserted LAST is rolled back, so
+                // exactly one booking wins the slot and the other client gets the same
+                // "already booked" message. Only affects part-time rows with a slot.
+                if (model.JobType == "Part-Time" && model.SlotId != null && model.InterviewDate != null)
+                {
+                    var dayFrom = model.InterviewDate.Value.Date;
+                    var dayTo = dayFrom.AddDays(1);
+
+                    bool lostTheRace = await _context.Interviews.AnyAsync(i =>
+                        i.InterviewId != model.InterviewId &&
+                        i.InterviewId < model.InterviewId &&
+                        i.WorkerId == model.WorkerId &&
+                        i.SlotId == model.SlotId &&
+                        i.InterviewDate != null &&
+                        i.InterviewDate >= dayFrom && i.InterviewDate < dayTo &&
+                        i.Status != "Rejected" &&
+                        i.Status != "JobRejected" &&
+                        i.Status != "Terminated" &&
+                        i.Status != "Resigned" &&
+                        i.Status != "Completed");
+
+                    if (lostTheRace)
+                    {
+                        _context.Interviews.Remove(model);
+                        await _context.SaveChangesAsync();
+                        return BadRequest(new { message = "That time slot was just booked by another client. Please pick another one." });
+                    }
+                }
+
                 // Echo the created id + the frozen type back to the app
                 return Ok(new
                 {
                     message = $"{model.JobType} interview request booked successfully!",
                     interviewId = model.InterviewId,
                     jobType = model.JobType,
+                    slotId = model.SlotId,
                     status = model.Status,
                     workerDecision = model.WorkerDecision
                 });
@@ -1260,6 +1600,9 @@ namespace Fyp_Backend.Controllers
                         location = h.Address ?? h.Interview.Address,
                         picture = h.Interview.Worker.Picture,
                         jobType = h.Interview.JobType ?? "Full-Time",
+                        slotId = h.Interview.SlotId,
+                        slotStartTime = _context.WorkerTimeSlots.Where(s => s.Id == h.Interview.SlotId).Select(s => (TimeSpan?)s.StartTime).FirstOrDefault(),
+                        slotEndTime = _context.WorkerTimeSlots.Where(s => s.Id == h.Interview.SlotId).Select(s => (TimeSpan?)s.EndTime).FirstOrDefault(),
                         date = h.HiringDate != null ? h.HiringDate.Value.ToString("yyyy-MM-dd") : "",
                         status = h.Interview!.Status == "ResignationPending" ? "Pending Resignation"
                                 : h.Interview!.Status == "Resigned" ? "Resigned"
@@ -1285,7 +1628,7 @@ namespace Fyp_Backend.Controllers
             }
         }
 
-        
+
         [HttpPost("CreateHiring")]
         public async Task<IActionResult> CreateHiring([FromBody] HiringDto model)
         {
@@ -1371,16 +1714,19 @@ namespace Fyp_Backend.Controllers
                     {
                         id = i.InterviewId.ToString(),
                         client = i.Client != null ? i.Client.Name : "Unknown Client",
-                        clientId=i.Client.ClientId,
+                        clientId = i.Client.ClientId,
                         location = i.Address ?? "N/A",
                         timeRaw = i.InterviewDate,
                         time = i.InterviewDate != null ? i.InterviewDate.Value.ToString("MMM dd, hh:mm tt") : "Not Set",
                         service = "Interview Request",
                         jobType = i.JobType ?? "Full-Time",
+                        slotId = i.SlotId,
+                        slotStartTime = _context.WorkerTimeSlots.Where(s => s.Id == i.SlotId).Select(s => (TimeSpan?)s.StartTime).FirstOrDefault(),
+                        slotEndTime = _context.WorkerTimeSlots.Where(s => s.Id == i.SlotId).Select(s => (TimeSpan?)s.EndTime).FirstOrDefault(),
                         clientPhone = i.Client != null ? i.Client.Phone : "N/A",
                         clientPicture = i.Client != null ? i.Client.Picture : null,
-                        clientRating = i.Client != null ? (_context.Reviews.Any(r => r.Interview!.ClientId == i.ClientId && r.ReviewerRole == "Worker") 
-                            ? Math.Round(_context.Reviews.Where(r => r.Interview!.ClientId == i.ClientId && r.ReviewerRole == "Worker").Average(r => (double)r.Rating!), 1) 
+                        clientRating = i.Client != null ? (_context.Reviews.Any(r => r.Interview!.ClientId == i.ClientId && r.ReviewerRole == "Worker")
+                            ? Math.Round(_context.Reviews.Where(r => r.Interview!.ClientId == i.ClientId && r.ReviewerRole == "Worker").Average(r => (double)r.Rating!), 1)
                             : 0.0) : 0.0
                     })
                     .ToListAsync();
@@ -1419,10 +1765,13 @@ namespace Fyp_Backend.Controllers
                         time = i.InterviewDate != null ? i.InterviewDate.Value.ToString("MMM dd, hh:mm tt") : "Not Set",
                         service = "Interview Request",
                         jobType = i.JobType ?? "Full-Time",
+                        slotId = i.SlotId,
+                        slotStartTime = _context.WorkerTimeSlots.Where(s => s.Id == i.SlotId).Select(s => (TimeSpan?)s.StartTime).FirstOrDefault(),
+                        slotEndTime = _context.WorkerTimeSlots.Where(s => s.Id == i.SlotId).Select(s => (TimeSpan?)s.EndTime).FirstOrDefault(),
                         clientPhone = i.Client != null ? i.Client.Phone : "N/A",
                         clientPicture = i.Client != null ? i.Client.Picture : null,
-                        clientRating = i.Client != null ? (_context.Reviews.Any(r => r.Interview!.ClientId == i.ClientId && r.ReviewerRole == "Worker") 
-                            ? Math.Round(_context.Reviews.Where(r => r.Interview!.ClientId == i.ClientId && r.ReviewerRole == "Worker").Average(r => (double)r.Rating!), 1) 
+                        clientRating = i.Client != null ? (_context.Reviews.Any(r => r.Interview!.ClientId == i.ClientId && r.ReviewerRole == "Worker")
+                            ? Math.Round(_context.Reviews.Where(r => r.Interview!.ClientId == i.ClientId && r.ReviewerRole == "Worker").Average(r => (double)r.Rating!), 1)
                             : 0.0) : 0.0
                     })
                     .ToListAsync();
@@ -1503,9 +1852,12 @@ namespace Fyp_Backend.Controllers
                         hiringDecision = h.HiringDecision ?? "Pending",
                         workerDecision = h.WorkerDecision ?? "Pending",
                         jobType = h.Interview.JobType ?? "Full-Time",
+                        slotId = h.Interview.SlotId,
+                        slotStartTime = _context.WorkerTimeSlots.Where(s => s.Id == h.Interview.SlotId).Select(s => (TimeSpan?)s.StartTime).FirstOrDefault(),
+                        slotEndTime = _context.WorkerTimeSlots.Where(s => s.Id == h.Interview.SlotId).Select(s => (TimeSpan?)s.EndTime).FirstOrDefault(),
                         clientImage = h.Interview.Client != null ? h.Interview.Client.Picture : null,
-                        clientRating = h.Interview.Client != null ? (_context.Reviews.Any(r => r.Interview!.ClientId == h.Interview.ClientId && r.ReviewerRole == "Worker") 
-                            ? Math.Round(_context.Reviews.Where(r => r.Interview!.ClientId == h.Interview.ClientId && r.ReviewerRole == "Worker").Average(r => (double)r.Rating!), 1) 
+                        clientRating = h.Interview.Client != null ? (_context.Reviews.Any(r => r.Interview!.ClientId == h.Interview.ClientId && r.ReviewerRole == "Worker")
+                            ? Math.Round(_context.Reviews.Where(r => r.Interview!.ClientId == h.Interview.ClientId && r.ReviewerRole == "Worker").Average(r => (double)r.Rating!), 1)
                             : 0.0) : 0.0
                     })
                     .ToListAsync();
@@ -1606,6 +1958,14 @@ namespace Fyp_Backend.Controllers
                         address = item.address,
                         message = msg,
                         type = type,
+                        // These four are carried through from the query above. This endpoint
+                        // rebuilds every row here, and that second projection silently dropped
+                        // them — which is why the Job Offer card kept showing FULL-TIME and no
+                        // slot chip while every other screen was correct.
+                        jobType = item.jobType,
+                        slotId = item.slotId,
+                        slotStartTime = item.slotStartTime,
+                        slotEndTime = item.slotEndTime,
                         clientImage = item.clientImage
                     };
                 });
@@ -1692,6 +2052,9 @@ namespace Fyp_Backend.Controllers
                         WorkerDecision = h.WorkerDecision, // "Pending", "Accepted", "Rejected"
                         HiringDecision = h.HiringDecision, // "Pending", "Accepted" etc.
                         JobType = h.Interview!.JobType ?? "Full-Time",
+                        slotId = h.Interview!.SlotId,
+                        slotStartTime = _context.WorkerTimeSlots.Where(s => s.Id == h.Interview!.SlotId).Select(s => (TimeSpan?)s.StartTime).FirstOrDefault(),
+                        slotEndTime = _context.WorkerTimeSlots.Where(s => s.Id == h.Interview!.SlotId).Select(s => (TimeSpan?)s.EndTime).FirstOrDefault(),
                         Address = h.Address,
                         HiringDate = h.HiringDate
                     })
@@ -1704,7 +2067,7 @@ namespace Fyp_Backend.Controllers
                 return StatusCode(500, new { message = "Failed to fetch active hiring statuses: " + ex.Message });
             }
         }
-        
+
 
         [HttpPut("ClientConfirmWorkerAcceptance/{id}")]
         public async Task<IActionResult> ClientConfirmWorkerAcceptance(int id)
@@ -1947,7 +2310,9 @@ namespace Fyp_Backend.Controllers
                     .Include(r => r.Interview)
                         .ThenInclude(i => i.Worker) // Removed .ThenInclude(w => w.Category)
                     .Where(r => r.Interview != null && r.Interview.ClientId == clientId)
-                    .OrderByDescending(r => r.SubmittedDate)
+                    // Resignations the client still has to act on come first, newest first.
+                    .OrderBy(r => r.Interview!.Status == "Resigned" ? 1 : 0)
+                    .ThenByDescending(r => r.SubmittedDate)
                     .ToListAsync();
 
                 var results = new List<object>();
@@ -1960,9 +2325,18 @@ namespace Fyp_Backend.Controllers
                         .Join(_context.Categories, wc => wc.CategoryId, c => c.CategoryId, (wc, c) => c.CategoryName)
                         .FirstOrDefaultAsync() ?? "Worker";
 
+                    int interviewId = r.InterviewId ?? 0;
+                    var clientConfirmed = r.Interview?.Status == "Resigned"
+                        || await _context.Reviews.AnyAsync(rev => rev.InterviewId == interviewId && rev.ReviewerRole == "Client");
+                    var hasWorkerReview = await _context.Reviews.AnyAsync(rev => rev.InterviewId == interviewId && rev.ReviewerRole == "Worker");
+
                     results.Add(new
                     {
                         resignationId = r.ResignationId,
+                        interviewId = interviewId,
+                        status = r.Interview?.Status ?? "Pending",
+                        isConfirmed = clientConfirmed,
+                        hasWorkerReview = hasWorkerReview,
                         workerName = r.Interview?.Worker?.Name ?? "Unknown Worker",
                         workerRole = workerRole,
                         reason = r.ResignationReason,
@@ -2014,8 +2388,59 @@ namespace Fyp_Backend.Controllers
                 if (progress > 1) progress = 1;
                 if (progress < 0) progress = 0;
 
-                bool hasClientReview = await _context.Reviews.AnyAsync(r => r.InterviewId == resignation.InterviewId);
+                // Only the CLIENT's own closing review counts as "the client confirmed this".
+                // The old check had no ReviewerRole filter, so the review the WORKER wrote while
+                // submitting the resignation satisfied it — that is why the client's screen said
+                // "This resignation has already been confirmed and is now readonly" and the
+                // Confirm button was dead before the client had done anything.
+                bool hasClientReview = await _context.Reviews.AnyAsync(r =>
+                    r.InterviewId == resignation.InterviewId && r.ReviewerRole == "Client");
+
                 bool isConfirmed = resignation.Interview?.Status == "Resigned" || hasClientReview;
+
+                // Both sides of the story for this contract, so the screen can show what the
+                // worker said about the client when they resigned.
+                int contractId = resignation.InterviewId ?? 0;
+
+                var contractReviews = await _context.Reviews
+                    .Where(r => r.InterviewId == resignation.InterviewId)
+                    .Select(r => new { r.ReviewId, r.ReviewerRole, r.Rating, r.Comment, r.ReviewDate })
+                    .OrderByDescending(r => r.ReviewDate)
+                    .ThenByDescending(r => r.ReviewId)
+                    .ToListAsync();
+
+                var clientReviewRow = contractReviews.FirstOrDefault(r => r.ReviewerRole == "Client");
+                var workerReviewRow = contractReviews.FirstOrDefault(r => r.ReviewerRole == "Worker");
+
+                // Worked period of this contract: Hiring_Date -> Last Working Day.
+                var contractWindows = await LoadContractWindowsAsync(
+                    new List<int> { contractId },
+                    new Dictionary<int, DateTime?> { { contractId, clientReviewRow?.ReviewDate ?? workerReviewRow?.ReviewDate } });
+                contractWindows.TryGetValue(contractId, out var contractWindow);
+                var workedPeriod = FormatWorkedPeriod(contractWindow.From, contractWindow.To);
+
+                object? workerReview = null;
+                if (workerReviewRow != null)
+                {
+                    workerReview = new
+                    {
+                        rating = workerReviewRow.Rating ?? 0,
+                        comment = workerReviewRow.Comment ?? "",
+                        date = workerReviewRow.ReviewDate?.ToString("MMM dd, yyyy") ?? "N/A",
+                        workedPeriod = workedPeriod
+                    };
+                }
+
+                object? clientReview = null;
+                if (clientReviewRow != null)
+                {
+                    clientReview = new
+                    {
+                        rating = clientReviewRow.Rating ?? 0,
+                        comment = clientReviewRow.Comment ?? "",
+                        date = clientReviewRow.ReviewDate?.ToString("MMM dd, yyyy") ?? "N/A"
+                    };
+                }
 
                 return Ok(new
                 {
@@ -2030,7 +2455,11 @@ namespace Fyp_Backend.Controllers
                     remainingDays = remainingDays,
                     progress = Math.Round(progress, 2),
                     status = resignation.Interview?.Status ?? "Pending",
-                    isConfirmed = isConfirmed
+                    isConfirmed = isConfirmed,
+                    reviewSubmitted = hasClientReview,
+                    workerReview = workerReview,
+                    clientReview = clientReview,
+                    workedPeriod = workedPeriod
                 });
             }
             catch (Exception ex)
@@ -2048,13 +2477,27 @@ namespace Fyp_Backend.Controllers
                 var interview = await _context.Interviews.FindAsync(model.InterviewId);
                 if (interview == null) return NotFound(new { message = "Interview record not found." });
 
+                // The client may only confirm a resignation that actually exists…
                 var resignation = await _context.Resignations
                     .Where(r => r.InterviewId == model.InterviewId)
                     .OrderByDescending(r => r.SubmittedDate)
                     .FirstOrDefaultAsync();
 
+                if (resignation == null)
+                    return NotFound(new { message = "No resignation is on record for this contract." });
+
                 if (interview.Status == "Resigned")
                     return BadRequest(new { message = "This resignation has already been confirmed." });
+
+                if (interview.Status == "Terminated")
+                    return BadRequest(new { message = "This contract was terminated, there is no resignation to confirm." });
+
+                // …and only once, with one closing review (a re-opened screen used to be
+                // able to write a second rating for the same contract).
+                var alreadyReviewed = await _context.Reviews.AnyAsync(r =>
+                    r.InterviewId == model.InterviewId && r.ReviewerRole == "Client");
+                if (alreadyReviewed)
+                    return BadRequest(new { message = "You have already reviewed this worker for this contract." });
 
                 var review = new Review
                 {
@@ -2071,7 +2514,15 @@ namespace Fyp_Backend.Controllers
                 await _context.SaveChangesAsync();
                 await transaction.CommitAsync();
 
-                return Ok(new { message = "Resignation confirmed and worker record updated." });
+                return Ok(new
+                {
+                    message = "Resignation confirmed and worker record updated.",
+                    interviewId = model.InterviewId,
+                    status = interview.Status,
+                    rating = review.Rating,
+                    comment = review.Comment,
+                    confirmedDate = review.ReviewDate
+                });
             }
             catch (Exception ex)
             {
@@ -2089,6 +2540,16 @@ namespace Fyp_Backend.Controllers
                 // 1. Locate the Interview via the associated Hiring ID trace
                 var interview = await _context.Interviews.FindAsync(request.InterviewId);
                 if (interview == null) return NotFound(new { message = "Job record not found." });
+
+                // Contract can only be closed once, and only with one closing review —
+                // otherwise a double tap produced two Termination rows plus two ratings.
+                if (interview.Status == "Terminated")
+                    return BadRequest(new { message = "This contract has already been terminated." });
+
+                var alreadyReviewed = await _context.Reviews.AnyAsync(r =>
+                    r.InterviewId == request.InterviewId && r.ReviewerRole == "Client");
+                if (alreadyReviewed)
+                    return BadRequest(new { message = "A closing review already exists for this contract." });
 
                 // Add client rating and comment feedback to the review log
                 var review = new Review
@@ -2152,7 +2613,10 @@ namespace Fyp_Backend.Controllers
                                                               .Join(_context.Categories, wc => wc.CategoryId, c => c.CategoryId, (wc, c) => c.CategoryName)
                                                               .FirstOrDefault() ?? "Worker",
                         status = i.Status,
-                        jobType = i.JobType ?? "Full-Time"
+                        jobType = i.JobType ?? "Full-Time",
+                        slotId = i.SlotId,
+                        slotStartTime = _context.WorkerTimeSlots.Where(s => s.Id == i.SlotId).Select(s => (TimeSpan?)s.StartTime).FirstOrDefault(),
+                        slotEndTime = _context.WorkerTimeSlots.Where(s => s.Id == i.SlotId).Select(s => (TimeSpan?)s.EndTime).FirstOrDefault(),
                     })
                     .ToListAsync();
 
@@ -2182,7 +2646,11 @@ namespace Fyp_Backend.Controllers
                         t.TerminatedReason,
                         ClientName = t.Interview.Client.Name,
                         ClientPicture = t.Interview.Client.Picture,
-                        Status = t.Interview.Status
+                        Status = t.Interview.Status,
+                        // Lets WorkerTerminationScreen hide the star form when the worker
+                        // already rated this client (one review per side per contract).
+                        workerReviewSubmitted = _context.Reviews.Any(r =>
+                            r.InterviewId == t.InterviewId && r.ReviewerRole == "Worker")
                     })
                     .FirstOrDefaultAsync();
 
@@ -2195,7 +2663,7 @@ namespace Fyp_Backend.Controllers
                 return StatusCode(500, new { message = "Error: " + ex.Message });
             }
         }
-        
+
 
         [HttpPut("UpdateDutyStatus/{workerId}")]
         public async Task<IActionResult> UpdateDutyStatus(int workerId, [FromBody] bool isAvailable)
@@ -2276,15 +2744,15 @@ namespace Fyp_Backend.Controllers
             }
         }
 
-    // DTO Class
-    public class ClientLocationDTO
-    {
-        public int ClientId { get; set; }
-        public double Latitude { get; set; }
-        public double Longitude { get; set; }
-    }
+        // DTO Class
+        public class ClientLocationDTO
+        {
+            public int ClientId { get; set; }
+            public double Latitude { get; set; }
+            public double Longitude { get; set; }
+        }
 
-    public class HiringUpdateDto
+        public class HiringUpdateDto
         {
             public int HiringId { get; set; }
             public string HiringDecision { get; set; } = null!;
@@ -2310,6 +2778,13 @@ namespace Fyp_Backend.Controllers
                 var interview = await _context.Interviews.FindAsync(model.InterviewId);
                 if (interview == null) return NotFound(new { message = "Record not found." });
 
+                // One review per side per contract: without this a double tap (or a re-opened
+                // screen) stacked the same rating on the same job several times.
+                var alreadyReviewed = await _context.Reviews.AnyAsync(r =>
+                    r.InterviewId == model.InterviewId && r.ReviewerRole == "Worker");
+                if (alreadyReviewed)
+                    return BadRequest(new { message = "You have already reviewed this client for this contract." });
+
                 var review = new Review
                 {
                     InterviewId = model.InterviewId,
@@ -2320,7 +2795,7 @@ namespace Fyp_Backend.Controllers
                 };
                 _context.Reviews.Add(review);
                 await _context.SaveChangesAsync();
-                
+
                 return Ok(new { message = "Review submitted successfully." });
             }
             catch (Exception ex)
@@ -2336,31 +2811,59 @@ namespace Fyp_Backend.Controllers
             {
                 var client = await _context.Clients.FindAsync(clientId);
                 if (client == null) return NotFound(new { message = "Client not found." });
-                
+
                 var reviews = await _context.Reviews
                     .Include(r => r.Interview)
                         .ThenInclude(i => i.Worker)
                     .Where(r => r.Interview != null && r.Interview.ClientId == clientId && r.ReviewerRole == "Worker")
                     .Select(r => new {
+                        r.ReviewId,
+                        interviewId = r.InterviewId ?? 0,
+                        reviewDateRaw = r.ReviewDate,
                         reviewerName = r.Interview!.Worker != null ? r.Interview.Worker.Name : "Anonymous Worker",
                         rating = r.Rating,
                         comment = r.Comment,
                         date = r.ReviewDate != null ? r.ReviewDate.Value.ToString("MMM dd, yyyy") : "N/A"
                     })
-                    .OrderByDescending(r => r.date)
+                    // Order on the real columns — the old string sort on the formatted date put
+                    // "Jan 05, 2026" before "Dec 30, 2025".
+                    .OrderByDescending(r => r.reviewDateRaw)
+                    .ThenByDescending(r => r.ReviewId)
                     .ToListAsync();
-                    
-                double avgRating = reviews.Any() ? Math.Round(reviews.Average(r => (double)(r.rating ?? 0)), 1) : 0.0;
-                
-                return Ok(new {
+
+                // Worked period on every review: Hiring_Date -> Termination / Resignation date.
+                var profileReviewWindows = await LoadContractWindowsAsync(
+                    reviews.Select(r => r.interviewId).Distinct().ToList(),
+                    reviews.GroupBy(r => r.interviewId).ToDictionary(g => g.Key, g => g.Max(r => r.reviewDateRaw)));
+
+                var reviewPayload = reviews.Select(r =>
+                {
+                    profileReviewWindows.TryGetValue(r.interviewId, out var window);
+                    return new
+                    {
+                        id = r.ReviewId.ToString(),
+                        reviewerName = r.reviewerName,
+                        rating = r.rating,
+                        comment = r.comment,
+                        date = r.date,
+                        workedFrom = window.From?.ToString("yyyy-MM-dd"),
+                        workedTo = window.To?.ToString("yyyy-MM-dd"),
+                        workedPeriod = FormatWorkedPeriod(window.From, window.To)
+                    };
+                }).ToList();
+
+                double avgRating = reviewPayload.Any() ? Math.Round(reviewPayload.Average(r => (double)(r.rating ?? 0)), 1) : 0.0;
+
+                return Ok(new
+                {
                     clientId = client.ClientId,
                     name = client.Name,
                     phone = client.Phone,
                     address = client.Address,
                     picture = client.Picture,
                     rating = avgRating,
-                    reviewCount = reviews.Count,
-                    reviews = reviews
+                    reviewCount = reviewPayload.Count,
+                    reviews = reviewPayload
                 });
             }
             catch (Exception ex)
@@ -2368,7 +2871,6 @@ namespace Fyp_Backend.Controllers
                 return StatusCode(500, new { message = "Error fetching client profile: " + ex.Message });
             }
         }
-        [AllowAnonymous]
         [HttpGet("GetClientDetail/{clientId}")]
         public async Task<IActionResult> GetClientDetail(int clientId)
         {
@@ -2385,20 +2887,47 @@ namespace Fyp_Backend.Controllers
                     .Include(r => r.Interview)
                         .ThenInclude(i => i.Worker)
                     .Where(r => r.Interview.ClientId == clientId && r.ReviewerRole == "Worker")
+                    // Order on the real columns (the old `.OrderByDescending(r => r.id)` was a
+                    // STRING sort on the projected ReviewId, so "9" beat "10")
+                    .OrderByDescending(r => r.ReviewDate)
+                    .ThenByDescending(r => r.ReviewId)
                     .Select(r => new
                     {
-                        id = r.ReviewId.ToString(),
+                        r.ReviewId,
+                        interviewId = r.InterviewId ?? 0,
+                        reviewDateRaw = r.ReviewDate,
                         reviewerName = r.Interview.Worker != null ? r.Interview.Worker.Name : "Anonymous Worker",
                         reviewerImage = r.Interview.Worker != null ? r.Interview.Worker.Picture : "",
                         rating = r.Rating ?? 0,
                         comment = r.Comment ?? "",
                         date = r.ReviewDate.HasValue ? r.ReviewDate.Value.ToString("MMM dd, yyyy") : "N/A"
                     })
-                    .OrderByDescending(r => r.id)
                     .ToListAsync();
 
-                double avgRating = workerReviewsOfClient.Any()
-                    ? Math.Round(workerReviewsOfClient.Average(r => (double)r.rating), 1)
+                // Worked period on every review: Hiring_Date -> Termination / Resignation date.
+                var clientReviewWindows = await LoadContractWindowsAsync(
+                    workerReviewsOfClient.Select(r => r.interviewId).Distinct().ToList(),
+                    workerReviewsOfClient.GroupBy(r => r.interviewId).ToDictionary(g => g.Key, g => g.Max(r => r.reviewDateRaw)));
+
+                var reviewPayload = workerReviewsOfClient.Select(r =>
+                {
+                    clientReviewWindows.TryGetValue(r.interviewId, out var window);
+                    return new
+                    {
+                        id = r.ReviewId.ToString(),
+                        reviewerName = r.reviewerName,
+                        reviewerImage = r.reviewerImage,
+                        rating = r.rating,
+                        comment = r.comment,
+                        date = r.date,
+                        workedFrom = window.From?.ToString("yyyy-MM-dd"),
+                        workedTo = window.To?.ToString("yyyy-MM-dd"),
+                        workedPeriod = FormatWorkedPeriod(window.From, window.To)
+                    };
+                }).ToList();
+
+                double avgRating = reviewPayload.Any()
+                    ? Math.Round(reviewPayload.Average(r => (double)r.rating), 1)
                     : 0.0;
 
                 return Ok(new
@@ -2410,8 +2939,8 @@ namespace Fyp_Backend.Controllers
                     address = client.Address,
                     picture = client.Picture,
                     rating = avgRating,
-                    reviewCount = workerReviewsOfClient.Count,
-                    reviews = workerReviewsOfClient
+                    reviewCount = reviewPayload.Count,
+                    reviews = reviewPayload
                 });
             }
             catch (Exception ex)
@@ -2507,7 +3036,7 @@ namespace Fyp_Backend.Controllers
         {
             try
             {
-                if (radius < 1 || radius > 50)
+                if (radius < 1 || radius > 70)
                     return BadRequest(new { message = "Invalid radius distance." });
 
                 var worker = await _context.Workers.FindAsync(workerId);
@@ -2537,6 +3066,6 @@ namespace Fyp_Backend.Controllers
         public string? HiringDecision { get; set; }
         public string? Address { get; set; }
     }
-    }
+}
 
 

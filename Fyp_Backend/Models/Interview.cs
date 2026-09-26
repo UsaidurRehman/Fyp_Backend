@@ -23,6 +23,10 @@ public partial class Interview
 
     public string? JobType { get; set; }
 
+    // WorkerTimeSlots.Id picked by the client when the booking is Part-Time
+    // (client inside the worker's radius). NULL = full-time booking / old rows.
+    public int? SlotId { get; set; }
+
     public virtual ICollection<Resignation> Resignations { get; set; } = new List<Resignation>();
 
     public virtual ICollection<Review> Reviews { get; set; } = new List<Review>();
@@ -31,4 +35,6 @@ public partial class Interview
     public virtual ICollection<Hiring> Hirings { get; set; } = new List<Hiring>();
 
     public virtual Worker? Worker { get; set; }
+
+    public virtual WorkerTimeSlots? Slot { get; set; }
 }

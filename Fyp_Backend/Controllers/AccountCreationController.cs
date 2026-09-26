@@ -83,13 +83,41 @@ namespace Fyp_Backend.Controllers
         }
 
         [HttpPost("SignupWorker")]
-        public async Task<IActionResult> SignupWorker([FromForm] Worker model, [FromForm] string experiencesJson)
+        public async Task<IActionResult> SignupWorker([FromForm] Worker model, [FromForm] string experiencesJson, [FromForm] string? habitsJson = null)
         {
             using var transaction = await _context.Database.BeginTransactionAsync();
             try
             {
                 if (await _context.Workers.AnyAsync(w => w.Cnic == model.Cnic))
                     return BadRequest(new { message = "CNIC is already registered." });
+
+                // Habits are mandatory at signup, and only ids from the master
+                // list are accepted — the app never sends free text.
+                List<int> habitIds = new List<int>();
+                if (!string.IsNullOrWhiteSpace(habitsJson))
+                {
+                    try
+                    {
+                        habitIds = JsonConvert.DeserializeObject<List<int>>(habitsJson) ?? new List<int>();
+                    }
+                    catch
+                    {
+                        return BadRequest(new { message = "Habits payload was not in the expected format." });
+                    }
+                }
+
+                habitIds = habitIds.Where(id => id > 0).Distinct().ToList();
+
+                if (habitIds.Count == 0)
+                    return BadRequest(new { message = "Please select at least one habit before creating the account." });
+
+                var validHabitIds = await _context.Habits
+                    .Where(h => habitIds.Contains(h.HabitId))
+                    .Select(h => h.HabitId)
+                    .ToListAsync();
+
+                if (validHabitIds.Count != habitIds.Count)
+                    return BadRequest(new { message = "One of the selected habits no longer exists." });
 
                 string imagePath = await SaveImage(model.PictureFile, model.Cnic);
                 if (imagePath == "Invalid") return BadRequest(new { message = "Invalid image." });
@@ -135,8 +163,19 @@ namespace Fyp_Backend.Controllers
                     await _context.SaveChangesAsync();
                 }
 
+                foreach (var habitId in validHabitIds)
+                {
+                    _context.WorkerHabits.Add(new WorkerHabits
+                    {
+                        WorkerId = model.WorkerId,
+                        HabitId = habitId,
+                        CreatedDate = DateTime.Now
+                    });
+                }
+                await _context.SaveChangesAsync();
+
                 await transaction.CommitAsync();
-                return Ok(new { status = "Success", message = "Profile and Skills created!" });
+                return Ok(new { status = "Success", message = "Profile, Skills and Habits created!" });
             }
             catch (Exception ex)
             {
@@ -146,7 +185,7 @@ namespace Fyp_Backend.Controllers
         }
 
         [HttpPost("UpdateWorker")]
-        public async Task<IActionResult> UpdateWorker([FromForm] Worker model, [FromForm] string experiencesJson)
+        public async Task<IActionResult> UpdateWorker([FromForm] Worker model, [FromForm] string experiencesJson, [FromForm] string? habitsJson = null)
         {
             using var transaction = await _context.Database.BeginTransactionAsync();
             try
@@ -214,6 +253,46 @@ namespace Fyp_Backend.Controllers
                             }
                         }
                         await _context.SaveChangesAsync();
+                    }
+                }
+
+                // Habits: the field is only present when the app sends it, so an
+                // omitted habitsJson leaves the worker's habits untouched while an
+                // explicit [] clears them. Unknown ids are ignored.
+                if (habitsJson != null && model.WorkerId > 0)
+                {
+                    List<int> habitIds;
+                    try
+                    {
+                        habitIds = JsonConvert.DeserializeObject<List<int>>(habitsJson) ?? new List<int>();
+                    }
+                    catch
+                    {
+                        return BadRequest(new { message = "Habits payload was not in the expected format." });
+                    }
+
+                    var wantedIds = habitIds.Where(id => id > 0).Distinct().ToList();
+                    var validIds = await _context.Habits
+                        .Where(h => wantedIds.Contains(h.HabitId))
+                        .Select(h => h.HabitId)
+                        .ToListAsync();
+
+                    var oldHabits = await _context.WorkerHabits
+                        .Where(wh => wh.WorkerId == model.WorkerId)
+                        .ToListAsync();
+
+                    var removeHabits = oldHabits.Where(wh => !validIds.Contains(wh.HabitId)).ToList();
+                    if (removeHabits.Any()) _context.WorkerHabits.RemoveRange(removeHabits);
+
+                    var haveIds = oldHabits.Select(wh => wh.HabitId).ToHashSet();
+                    foreach (var id in validIds.Where(id => !haveIds.Contains(id)))
+                    {
+                        _context.WorkerHabits.Add(new WorkerHabits
+                        {
+                            WorkerId = model.WorkerId,
+                            HabitId = id,
+                            CreatedDate = DateTime.Now
+                        });
                     }
                 }
 
@@ -361,14 +440,17 @@ namespace Fyp_Backend.Controllers
             if (file == null || file.Length == 0) return null;
 
             List<string> allowedExt = new List<string>() { ".jpg", ".jpeg", ".png" };
-            var ext = Path.GetExtension(file.FileName).ToLower();
+            string rawExt = !string.IsNullOrEmpty(file.FileName) ? Path.GetExtension(file.FileName) : ".jpg";
+            string ext = string.IsNullOrEmpty(rawExt) ? ".jpg" : rawExt.ToLower();
 
             if (!allowedExt.Contains(ext)) return "Invalid";
 
-            string folder = Path.Combine(_environment.WebRootPath, "Images");
+            string rootPath = _environment.WebRootPath ?? Path.Combine(Directory.GetCurrentDirectory(), "wwwroot");
+            string folder = Path.Combine(rootPath, "Images");
             if (!Directory.Exists(folder)) Directory.CreateDirectory(folder);
 
-            string myfn = identifier + ext;
+            string safeIdentifier = string.Concat((identifier ?? "file").Split(Path.GetInvalidFileNameChars())).Replace("@", "_").Replace(".", "_");
+            string myfn = safeIdentifier + ext;
             string filePath = Path.Combine(folder, myfn);
 
             using (var stream = new FileStream(filePath, FileMode.Create))
