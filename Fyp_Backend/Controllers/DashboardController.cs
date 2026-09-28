@@ -306,12 +306,10 @@ namespace Fyp_Backend.Controllers
                         .Distinct()
                         .ToListAsync();
 
-                    // Check Police Records Status
-                    bool isFlagged = await _context.PoliceRecords
-                        .AnyAsync(pr => pr.WorkerID == w.WorkerId && pr.IsFlagged == true);
-
-                    bool isBlocked = await _context.PoliceRecords
-                        .AnyAsync(pr => pr.WorkerID == w.WorkerId && pr.IsBlocked == true);
+                    // Police character-certificate status: certified = a non-revoked
+                    // certificate that has not passed its 5-year expiry.
+                    bool isPoliceVerified = await _context.PoliceRecords
+                        .AnyAsync(pr => pr.WorkerID == w.WorkerId && !pr.IsRevoked && pr.ExpiryDate > DateTime.Now);
 
                     results.Add(new
                     {
@@ -326,8 +324,7 @@ namespace Fyp_Backend.Controllers
                         gender = w.Gender ?? "N/A",
                         categories = workerCategoryNames,
                         availableStatus = w.AvailableStatus ?? false,
-                        isFlagged = isFlagged,
-                        isBlocked = isBlocked
+                        isPoliceVerified = isPoliceVerified
                     });
                 }
 

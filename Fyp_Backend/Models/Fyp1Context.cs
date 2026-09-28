@@ -30,7 +30,7 @@ public partial class Fyp1Context : DbContext
     public virtual DbSet<Company> Companies { get; set; }
     public virtual DbSet<PoliceOfficer> PoliceOfficers { get; set; }
     public virtual DbSet<WorkerCertification> WorkerCertifications { get; set; }
-    public virtual DbSet<PoliceRecord> PoliceRecords { get; set; }
+    public virtual DbSet<PoliceRecords> PoliceRecords { get; set; }
     public virtual DbSet<WorkerTimeSlots> WorkerTimeSlots { get; set; }
 
     // Updated naming to match standard conventions
@@ -297,19 +297,24 @@ public partial class Fyp1Context : DbContext
                 .HasForeignKey(d => d.WorkerID);
         });
 
-        modelBuilder.Entity<PoliceRecord>(entity =>
+        // Repurposed: now a positive, 5-year Character Certificate (see PoliceRecord.cs)
+        modelBuilder.Entity<PoliceRecords>(entity =>
         {
             entity.ToTable("PoliceRecords");
             entity.HasKey(e => e.RecordID);
 
             entity.Property(e => e.WorkerID).HasColumnName("WorkerID");
             entity.Property(e => e.PoliceID).HasColumnName("PoliceID");
-            entity.Property(e => e.FIRNumber).HasMaxLength(50);
-            entity.Property(e => e.OffenseCategory).HasMaxLength(100);
-            entity.Property(e => e.CaseDetails).HasColumnType("nvarchar(max)");
-            entity.Property(e => e.IsFlagged).HasDefaultValue(true);
-            entity.Property(e => e.IsBlocked).HasDefaultValue(false);
-            entity.Property(e => e.FiledDate).HasDefaultValueSql("(getdate())");
+            entity.Property(e => e.CertificateNo).HasMaxLength(50);
+            entity.Property(e => e.CharacterStatus).HasMaxLength(50);
+            entity.Property(e => e.Remarks).HasColumnType("nvarchar(max)");
+            entity.Property(e => e.VerifiedCnic).HasMaxLength(20);
+            entity.Property(e => e.CnicVerified).HasDefaultValue(false);
+            entity.Property(e => e.IssuingStation).HasMaxLength(150);
+            entity.Property(e => e.IssuingBadge).HasMaxLength(50);
+            entity.Property(e => e.IssuedDate).HasColumnType("datetime").HasDefaultValueSql("(getdate())");
+            entity.Property(e => e.ExpiryDate).HasColumnType("datetime");
+            entity.Property(e => e.IsRevoked).HasDefaultValue(false);
 
             entity.HasOne(d => d.PoliceOfficer)
                 .WithMany()
