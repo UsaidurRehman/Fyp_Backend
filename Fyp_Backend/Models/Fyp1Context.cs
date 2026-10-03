@@ -39,6 +39,9 @@ public partial class Fyp1Context : DbContext
     public virtual DbSet<Habit> Habits { get; set; }
 
     public virtual DbSet<WorkerHabits> WorkerHabits { get; set; }
+    public virtual DbSet<Course> Courses { get; set; }
+    public virtual DbSet<CourseEnrollment> CourseEnrollments { get; set; }
+    public virtual DbSet<CourseCertificate> CourseCertificates { get; set; }
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
@@ -369,6 +372,37 @@ public partial class Fyp1Context : DbContext
                 .WithMany(h => h.WorkerHabits)
                 .HasForeignKey(e => e.HabitId)
                 .OnDelete(DeleteBehavior.Restrict);
+        });
+
+        modelBuilder.Entity<Course>(entity =>
+        {
+            entity.HasKey(e => e.CourseID);
+            entity.Property(e => e.StartDate).HasColumnType("date");
+            entity.Property(e => e.EndDate).HasColumnType("date");
+            entity.Property(e => e.CreatedAtUtc).HasColumnType("datetime2(0)");
+            entity.Property(e => e.RowVersion).IsRowVersion();
+            entity.HasOne(e => e.Company).WithMany().HasForeignKey(e => e.CompanyID).OnDelete(DeleteBehavior.Restrict);
+        });
+
+        modelBuilder.Entity<CourseEnrollment>(entity =>
+        {
+            entity.HasKey(e => e.EnrollmentID);
+            entity.HasIndex(e => new { e.CourseID, e.WorkerID }).IsUnique();
+            entity.Property(e => e.RowVersion).IsRowVersion();
+            entity.HasOne(e => e.Course).WithMany(c => c.Enrollments).HasForeignKey(e => e.CourseID).OnDelete(DeleteBehavior.Restrict);
+            entity.HasOne(e => e.Worker).WithMany().HasForeignKey(e => e.WorkerID).OnDelete(DeleteBehavior.Restrict);
+        });
+
+        modelBuilder.Entity<CourseCertificate>(entity =>
+        {
+            entity.HasKey(e => e.CertificateID);
+            entity.HasIndex(e => e.CertificateCode).IsUnique();
+            entity.HasIndex(e => e.EnrollmentID).IsUnique();
+            entity.HasIndex(e => new { e.CourseID, e.WorkerID }).IsUnique();
+            entity.HasOne(e => e.Enrollment).WithOne(e => e.Certificate).HasForeignKey<CourseCertificate>(e => e.EnrollmentID).OnDelete(DeleteBehavior.Restrict);
+            entity.HasOne(e => e.Course).WithMany(c => c.Certificates).HasForeignKey(e => e.CourseID).OnDelete(DeleteBehavior.Restrict);
+            entity.HasOne(e => e.Worker).WithMany().HasForeignKey(e => e.WorkerID).OnDelete(DeleteBehavior.Restrict);
+            entity.HasOne(e => e.Company).WithMany().HasForeignKey(e => e.CompanyID).OnDelete(DeleteBehavior.Restrict);
         });
 
         OnModelCreatingPartial(modelBuilder);

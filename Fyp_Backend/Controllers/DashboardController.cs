@@ -571,11 +571,16 @@ namespace Fyp_Backend.Controllers
 
                     rawExperiences = worker.Experiences.Select(e => new
                     {
-                        CategoryId = e.CategoryId,
-                        SkillsId = e.SkillsId,
+                        ExperienceId = e.ExperienceId,
                         WorkAt = e.WorkAt,
                         Duration = e.Duration,
                         ExpDetail = e.ExpDetail
+                    }).ToList(),
+
+                    rawWorkerCategories = junctionData.Select(wc => new
+                    {
+                        CategoryId = wc.CategoryId,
+                        SkillsId = wc.SkillsId
                     }).ToList(),
 
                     experiences = worker.Experiences.Select(e => new

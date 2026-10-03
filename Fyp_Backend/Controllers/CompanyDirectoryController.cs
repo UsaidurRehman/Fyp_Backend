@@ -289,7 +289,9 @@
 //}
 using Fyp_Backend.Models;
 using Microsoft.AspNetCore.Mvc;
+using Microsoft.AspNetCore.Authorization;
 using Microsoft.EntityFrameworkCore;
+using System.Security.Claims;
 using System;
 using System.Linq;
 using System.Threading.Tasks;
@@ -462,13 +464,19 @@ namespace Fyp_Backend.Controllers
             }
         }
 
+        [Authorize(Roles = "Company")]
         [HttpPost("IssueCertificate")]
         public async Task<IActionResult> IssueCertificate([FromBody] IssueCertificateDto dto)
         {
             try
             {
-                if (dto == null || dto.WorkerId <= 0 || dto.CompanyId <= 0)
-                    return BadRequest(new { message = $"Invalid parameters: WorkerId={dto?.WorkerId}, CompanyId={dto?.CompanyId}" });
+                var rawCompanyId = User.FindFirstValue(ClaimTypes.NameIdentifier)
+                                  ?? User.FindFirstValue("sub");
+                if (!int.TryParse(rawCompanyId, out var authenticatedCompanyId) || authenticatedCompanyId <= 0)
+                    return Unauthorized(new { message = "The authenticated Company ID is invalid." });
+
+                if (dto == null || dto.WorkerId <= 0)
+                    return BadRequest(new { message = $"Invalid WorkerId: {dto?.WorkerId}" });
 
                 if (string.IsNullOrWhiteSpace(dto.CertificateTitle))
                     return BadRequest(new { message = "Certificate title is required." });
@@ -476,7 +484,7 @@ namespace Fyp_Backend.Controllers
                 var certification = new WorkerCertification
                 {
                     WorkerID = dto.WorkerId,
-                    CompanyID = dto.CompanyId,
+                    CompanyID = authenticatedCompanyId,
                     CertificateTitle = dto.CertificateTitle.Trim(),
                     TrainingEvaluationNotes = dto.TrainingEvaluationNotes?.Trim(),
                     IssuedDate = DateTime.Now
@@ -520,8 +528,50 @@ namespace Fyp_Backend.Controllers
                     })
                     .FirstOrDefaultAsync();
 
+                // If the worker has no legacy company verification, expose their
+                // newest course-completion certificate through the same response
+                // contract so the existing mobile certificate screen can render it.
                 if (certificate == null)
-                    return NotFound(new { message = "No certificate record found for this worker." });
+                {
+                    var courseCertificate = await _context.CourseCertificates
+                        .Where(c => c.WorkerID == workerId && !c.IsRevoked)
+                        .OrderByDescending(c => c.IssuedDateUtc)
+                        .Select(c => new
+                        {
+                            certificateId = c.CertificateID,
+                            certificateTitle = c.Course.CourseName,
+                            evaluationNotes = "Successfully completed the full company training course and satisfied its completion requirements.",
+                            issuedDate = c.IssuedDateUtc.ToString("dd-MM-yyyy"),
+                            workerName = c.Worker.Name ?? "N/A",
+                            workerPicture = c.Worker.Picture,
+                            companyName = c.Company.CompanyName,
+                            certificateCode = c.CertificateCode
+                        })
+                        .FirstOrDefaultAsync();
+
+                    if (courseCertificate == null)
+                        return NotFound(new { message = "No certificate record found for this worker." });
+
+                    string courseRawPic = string.IsNullOrWhiteSpace(courseCertificate.workerPicture) ? "worker_default.jpg" : courseCertificate.workerPicture;
+                    string courseCleanPicPath = courseRawPic.StartsWith("http")
+                        ? courseRawPic
+                        : (courseRawPic.StartsWith("/Images/") || courseRawPic.StartsWith("Images/")
+                            ? (courseRawPic.StartsWith("/") ? courseRawPic : "/" + courseRawPic)
+                            : $"/Images/{courseRawPic.TrimStart('/')}");
+
+                    return Ok(new
+                    {
+                        courseCertificate.certificateId,
+                        courseCertificate.certificateTitle,
+                        courseCertificate.evaluationNotes,
+                        courseCertificate.issuedDate,
+                        courseCertificate.workerName,
+                        workerPicture = courseCleanPicPath,
+                        courseCertificate.companyName,
+                        courseCertificate.certificateCode,
+                        certificateType = "CourseCompletion"
+                    });
+                }
 
                 string rawPic = string.IsNullOrWhiteSpace(certificate.workerPicture) ? "worker_default.jpg" : certificate.workerPicture;
                 string cleanPicPath = rawPic.StartsWith("http")

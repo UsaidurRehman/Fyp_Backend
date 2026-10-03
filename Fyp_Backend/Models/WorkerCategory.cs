@@ -1,4 +1,4 @@
-﻿namespace Fyp_Backend.Models
+namespace Fyp_Backend.Models
 {
     public class WorkerCategory
     {

@@ -83,7 +83,7 @@ namespace Fyp_Backend.Controllers
         }
 
         [HttpPost("SignupWorker")]
-        public async Task<IActionResult> SignupWorker([FromForm] Worker model, [FromForm] string experiencesJson, [FromForm] string? habitsJson = null)
+        public async Task<IActionResult> SignupWorker([FromForm] Worker model, [FromForm] string? experiencesJson = null, [FromForm] string? skillsJson = null, [FromForm] string? habitsJson = null)
         {
             using var transaction = await _context.Database.BeginTransactionAsync();
             try
@@ -131,22 +131,17 @@ namespace Fyp_Backend.Controllers
                 _context.Workers.Add(model);
                 await _context.SaveChangesAsync();
 
-                if (!string.IsNullOrEmpty(experiencesJson))
+                // Process Skills (WorkerCategories junction)
+                if (!string.IsNullOrEmpty(skillsJson))
                 {
-                    var experiences = JsonConvert.DeserializeObject<List<Experience>>(experiencesJson);
-                    if (experiences != null)
+                    var skillsList = JsonConvert.DeserializeObject<List<WorkerCategory>>(skillsJson);
+                    if (skillsList != null)
                     {
                         var uniqueJunctions = new HashSet<(int, int)>();
-                        foreach (var exp in experiences)
+                        foreach (var item in skillsList)
                         {
-                            exp.Worker = null;
-                            exp.WorkerId = model.WorkerId;
-                            exp.ExperienceId = 0;
-
-                            _context.Experiences.Add(exp);
-
-                            int catId = exp.CategoryId ?? 0;
-                            int skillId = exp.SkillsId ?? 0;
+                            int catId = item.CategoryId;
+                            int skillId = item.SkillsId;
 
                             if (catId > 0 && skillId > 0 && !uniqueJunctions.Contains((catId, skillId)))
                             {
@@ -158,6 +153,24 @@ namespace Fyp_Backend.Controllers
                                     SkillsId = skillId
                                 });
                             }
+                        }
+                    }
+                    await _context.SaveChangesAsync();
+                }
+
+                // Process Experience
+                if (!string.IsNullOrEmpty(experiencesJson))
+                {
+                    var experiences = JsonConvert.DeserializeObject<List<Experience>>(experiencesJson);
+                    if (experiences != null)
+                    {
+                        foreach (var exp in experiences)
+                        {
+                            exp.Worker = null;
+                            exp.WorkerId = model.WorkerId;
+                            exp.ExperienceId = 0;
+
+                            _context.Experiences.Add(exp);
                         }
                     }
                     await _context.SaveChangesAsync();
@@ -185,7 +198,7 @@ namespace Fyp_Backend.Controllers
         }
 
         [HttpPost("UpdateWorker")]
-        public async Task<IActionResult> UpdateWorker([FromForm] Worker model, [FromForm] string experiencesJson, [FromForm] string? habitsJson = null)
+        public async Task<IActionResult> UpdateWorker([FromForm] Worker model, [FromForm] string? experiencesJson = null, [FromForm] string? skillsJson = null, [FromForm] string? habitsJson = null)
         {
             using var transaction = await _context.Database.BeginTransactionAsync();
             try
@@ -217,29 +230,20 @@ namespace Fyp_Backend.Controllers
                     existingWorker.Password = model.Password;
                 }
 
-                if (!string.IsNullOrEmpty(experiencesJson))
+                if (skillsJson != null)
                 {
-                    var oldExps = await _context.Experiences.Where(e => e.WorkerId == model.WorkerId).ToListAsync();
-                    _context.Experiences.RemoveRange(oldExps);
-
                     var oldCats = await _context.WorkerCategories.Where(wc => wc.WorkerId == model.WorkerId).ToListAsync();
                     _context.WorkerCategories.RemoveRange(oldCats);
-
                     await _context.SaveChangesAsync();
 
-                    var experiences = JsonConvert.DeserializeObject<List<Experience>>(experiencesJson);
-                    if (experiences != null)
+                    var skillsList = JsonConvert.DeserializeObject<List<WorkerCategory>>(skillsJson);
+                    if (skillsList != null)
                     {
                         var uniqueJunctions = new HashSet<(int, int)>();
-
-                        foreach (var exp in experiences)
+                        foreach (var item in skillsList)
                         {
-                            exp.WorkerId = model.WorkerId;
-                            exp.ExperienceId = 0;
-                            _context.Experiences.Add(exp);
-
-                            int catId = exp.CategoryId ?? 0;
-                            int skillId = exp.SkillsId ?? 0;
+                            int catId = item.CategoryId;
+                            int skillId = item.SkillsId;
 
                             if (catId > 0 && skillId > 0 && !uniqueJunctions.Contains((catId, skillId)))
                             {
@@ -251,6 +255,25 @@ namespace Fyp_Backend.Controllers
                                     SkillsId = skillId
                                 });
                             }
+                        }
+                        await _context.SaveChangesAsync();
+                    }
+                }
+
+                if (experiencesJson != null)
+                {
+                    var oldExps = await _context.Experiences.Where(e => e.WorkerId == model.WorkerId).ToListAsync();
+                    _context.Experiences.RemoveRange(oldExps);
+                    await _context.SaveChangesAsync();
+
+                    var experiences = JsonConvert.DeserializeObject<List<Experience>>(experiencesJson);
+                    if (experiences != null)
+                    {
+                        foreach (var exp in experiences)
+                        {
+                            exp.WorkerId = model.WorkerId;
+                            exp.ExperienceId = 0;
+                            _context.Experiences.Add(exp);
                         }
                         await _context.SaveChangesAsync();
                     }
