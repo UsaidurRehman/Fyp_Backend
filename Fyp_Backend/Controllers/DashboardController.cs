@@ -285,6 +285,18 @@ namespace Fyp_Backend.Controllers
                 var workerList = await query.ToListAsync();
                 var results = new List<object>();
 
+                // Company certification flag for the "Certified" badge on the worker
+                // cards. One set-based query up front (legacy company certifications
+                // UNION non-revoked course certificates) instead of two more queries
+                // inside the per-worker loop below.
+                var certifiedWorkerIds = (await _context.WorkerCertifications
+                        .Select(wc => wc.WorkerID)
+                        .Union(_context.CourseCertificates
+                            .Where(cc => !cc.IsRevoked)
+                            .Select(cc => cc.WorkerID))
+                        .ToListAsync())
+                    .ToHashSet();
+
                 foreach (var w in workerList)
                 {
                     // Calculate Average Rating
@@ -324,7 +336,8 @@ namespace Fyp_Backend.Controllers
                         gender = w.Gender ?? "N/A",
                         categories = workerCategoryNames,
                         availableStatus = w.AvailableStatus ?? false,
-                        isPoliceVerified = isPoliceVerified
+                        isPoliceVerified = isPoliceVerified,
+                        isCompanyCertified = certifiedWorkerIds.Contains(w.WorkerId)
                     });
                 }
 
