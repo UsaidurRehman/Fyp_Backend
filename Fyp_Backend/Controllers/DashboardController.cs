@@ -358,6 +358,8 @@ namespace Fyp_Backend.Controllers
                     .Include(w => w.Experiences)
                     .Include(w => w.Interviews)
                         .ThenInclude(i => i.Reviews)
+                            .ThenInclude(r => r.ReviewCriteriaRatings)
+                                .ThenInclude(rc => rc.Criteria)
                     .Include(w => w.Interviews)
                         .ThenInclude(i => i.Client)
                     .FirstOrDefaultAsync(w => w.WorkerId == id);
@@ -449,10 +451,17 @@ namespace Fyp_Backend.Controllers
                             interviewId = i.InterviewId,
                             clientId = i.ClientId,
                             reviewerName = i.Client?.Name ?? "Anonymous",
+                            // How this contract ended -> drives the Terminated/Resigned badge.
+                            endType = i.Status,
                             rating = r.Rating,
                             comment = r.Comment,
                             date = r.ReviewDate?.ToString("MMM dd, yyyy") ?? "N/A",
-                            reviewDateRaw = r.ReviewDate
+                            reviewDateRaw = r.ReviewDate,
+                            criteria = r.ReviewCriteriaRatings
+                                .OrderBy(x => x.Criteria.SortOrder)
+                                .ThenBy(x => x.CriteriaId)
+                                .Select(x => new { name = x.Criteria.CriteriaName, score = x.Score })
+                                .ToList()
                         }))
                     .ToList();
 
@@ -468,8 +477,10 @@ namespace Fyp_Backend.Controllers
                     {
                         r.clientId,
                         r.reviewerName,
+                        r.endType,
                         r.rating,
                         r.comment,
+                        r.criteria,
                         r.date,
                         workedFrom = window.From?.ToString("yyyy-MM-dd"),
                         workedTo = window.To?.ToString("yyyy-MM-dd"),
@@ -1232,6 +1243,8 @@ namespace Fyp_Backend.Controllers
                 var worker = await _context.Workers
                     .Include(w => w.Interviews)
                         .ThenInclude(i => i.Reviews)
+                            .ThenInclude(r => r.ReviewCriteriaRatings)
+                                .ThenInclude(rc => rc.Criteria)
                     .Include(w => w.Interviews)
                         .ThenInclude(i => i.Client)
                     .FirstOrDefaultAsync(w => w.WorkerId == workerId);
@@ -1267,10 +1280,16 @@ namespace Fyp_Backend.Controllers
                             interviewId = i.InterviewId,
                             clientId = i.ClientId,
                             name = i.Client != null ? i.Client.Name : "Client",
+                            endType = i.Status,
                             rating = r.Rating ?? 0,
                             comment = r.Comment ?? "",
                             date = r.ReviewDate?.ToString("MMM dd, yyyy") ?? "N/A",
-                            reviewDateRaw = r.ReviewDate
+                            reviewDateRaw = r.ReviewDate,
+                            criteria = r.ReviewCriteriaRatings
+                                .OrderBy(x => x.Criteria.SortOrder)
+                                .ThenBy(x => x.CriteriaId)
+                                .Select(x => new { name = x.Criteria.CriteriaName, score = x.Score })
+                                .ToList()
                         }))
                     .ToList();
 
@@ -1287,8 +1306,10 @@ namespace Fyp_Backend.Controllers
                         r.id,
                         r.clientId,
                         r.name,
+                        r.endType,
                         r.rating,
                         r.comment,
+                        r.criteria,
                         r.date,
                         workedFrom = window.From?.ToString("yyyy-MM-dd"),
                         workedTo = window.To?.ToString("yyyy-MM-dd"),
@@ -2421,7 +2442,19 @@ namespace Fyp_Backend.Controllers
 
                 var contractReviews = await _context.Reviews
                     .Where(r => r.InterviewId == resignation.InterviewId)
-                    .Select(r => new { r.ReviewId, r.ReviewerRole, r.Rating, r.Comment, r.ReviewDate })
+                    .Select(r => new
+                    {
+                        r.ReviewId,
+                        r.ReviewerRole,
+                        r.Rating,
+                        r.Comment,
+                        r.ReviewDate,
+                        criteria = r.ReviewCriteriaRatings
+                            .OrderBy(x => x.Criteria.SortOrder)
+                            .ThenBy(x => x.CriteriaId)
+                            .Select(x => new { name = x.Criteria.CriteriaName, score = x.Score })
+                            .ToList()
+                    })
                     .OrderByDescending(r => r.ReviewDate)
                     .ThenByDescending(r => r.ReviewId)
                     .ToListAsync();
@@ -2444,7 +2477,8 @@ namespace Fyp_Backend.Controllers
                         rating = workerReviewRow.Rating ?? 0,
                         comment = workerReviewRow.Comment ?? "",
                         date = workerReviewRow.ReviewDate?.ToString("MMM dd, yyyy") ?? "N/A",
-                        workedPeriod = workedPeriod
+                        workedPeriod = workedPeriod,
+                        criteria = workerReviewRow.criteria
                     };
                 }
 
@@ -2455,7 +2489,8 @@ namespace Fyp_Backend.Controllers
                     {
                         rating = clientReviewRow.Rating ?? 0,
                         comment = clientReviewRow.Comment ?? "",
-                        date = clientReviewRow.ReviewDate?.ToString("MMM dd, yyyy") ?? "N/A"
+                        date = clientReviewRow.ReviewDate?.ToString("MMM dd, yyyy") ?? "N/A",
+                        criteria = clientReviewRow.criteria
                     };
                 }
 
@@ -2486,7 +2521,7 @@ namespace Fyp_Backend.Controllers
         }
 
         [HttpPost("ConfirmResignation")]
-        public async Task<IActionResult> ConfirmResignation([FromBody] Review model)
+        public async Task<IActionResult> ConfirmResignation([FromBody] ClosingReviewRequest model)
         {
             using var transaction = await _context.Database.BeginTransactionAsync();
             try
@@ -2516,13 +2551,21 @@ namespace Fyp_Backend.Controllers
                 if (alreadyReviewed)
                     return BadRequest(new { message = "You have already reviewed this worker for this contract." });
 
+                // Validate and score the per-criterion ratings before writing anything.
+                var criteria = await BuildCriteriaRatingsAsync(model.InterviewId, model.CriteriaScores);
+                if (criteria.Error != null)
+                    return BadRequest(new { message = criteria.Error });
+
+                // EF fills in Review_ID on the children through the navigation property,
+                // so a single SaveChanges writes the review and its criteria rows together.
                 var review = new Review
                 {
                     InterviewId = model.InterviewId,
-                    Rating = model.Rating,
+                    Rating = criteria.Average,
                     Comment = model.Comment,
                     ReviewerRole = "Client",
-                    ReviewDate = DateTime.Now
+                    ReviewDate = DateTime.Now,
+                    ReviewCriteriaRatings = criteria.Rows
                 };
                 _context.Reviews.Add(review);
 
@@ -2568,14 +2611,20 @@ namespace Fyp_Backend.Controllers
                 if (alreadyReviewed)
                     return BadRequest(new { message = "A closing review already exists for this contract." });
 
-                // Add client rating and comment feedback to the review log
+                // Add the client's criteria-scored closing review to the review log.
+                // The overall Rating is derived from the criteria, not sent by the client.
+                var criteria = await BuildCriteriaRatingsAsync(request.InterviewId, request.CriteriaScores);
+                if (criteria.Error != null)
+                    return BadRequest(new { message = criteria.Error });
+
                 var review = new Review
                 {
                     InterviewId = request.InterviewId,
-                    Rating = request.Rating,
+                    Rating = criteria.Average,
                     Comment = request.Remarks,
                     ReviewerRole = "Client",
-                    ReviewDate = DateTime.Now
+                    ReviewDate = DateTime.Now,
+                    ReviewCriteriaRatings = criteria.Rows
                 };
                 _context.Reviews.Add(review);
 
@@ -2780,7 +2829,15 @@ namespace Fyp_Backend.Controllers
             public int InterviewId { get; set; }
             public string Reason { get; set; } = null!;
             public string? Remarks { get; set; }
+
+            /// <summary>
+            /// Legacy field. The overall is now derived from CriteriaScores, so this
+            /// is ignored on the client -> worker closing review. Kept so older
+            /// clients that still post it do not fail model binding.
+            /// </summary>
             public int Rating { get; set; }
+
+            public List<CriteriaScoreDto> CriteriaScores { get; set; } = new();
         }
 
         [HttpPost("SubmitWorkerReviewToClient")]
@@ -2838,9 +2895,15 @@ namespace Fyp_Backend.Controllers
                         interviewId = r.InterviewId ?? 0,
                         reviewDateRaw = r.ReviewDate,
                         reviewerName = r.Interview!.Worker != null ? r.Interview.Worker.Name : "Anonymous Worker",
+                        endType = r.Interview.Status,
                         rating = r.Rating,
                         comment = r.Comment,
-                        date = r.ReviewDate != null ? r.ReviewDate.Value.ToString("MMM dd, yyyy") : "N/A"
+                        date = r.ReviewDate != null ? r.ReviewDate.Value.ToString("MMM dd, yyyy") : "N/A",
+                        criteria = r.ReviewCriteriaRatings
+                            .OrderBy(x => x.Criteria.SortOrder)
+                            .ThenBy(x => x.CriteriaId)
+                            .Select(x => new { name = x.Criteria.CriteriaName, score = x.Score })
+                            .ToList()
                     })
                     // Order on the real columns — the old string sort on the formatted date put
                     // "Jan 05, 2026" before "Dec 30, 2025".
@@ -2860,8 +2923,10 @@ namespace Fyp_Backend.Controllers
                     {
                         id = r.ReviewId.ToString(),
                         reviewerName = r.reviewerName,
+                        endType = r.endType,
                         rating = r.rating,
                         comment = r.comment,
+                        criteria = r.criteria,
                         date = r.date,
                         workedFrom = window.From?.ToString("yyyy-MM-dd"),
                         workedTo = window.To?.ToString("yyyy-MM-dd"),
@@ -2915,9 +2980,15 @@ namespace Fyp_Backend.Controllers
                         reviewDateRaw = r.ReviewDate,
                         reviewerName = r.Interview.Worker != null ? r.Interview.Worker.Name : "Anonymous Worker",
                         reviewerImage = r.Interview.Worker != null ? r.Interview.Worker.Picture : "",
+                        endType = r.Interview.Status,
                         rating = r.Rating ?? 0,
                         comment = r.Comment ?? "",
-                        date = r.ReviewDate.HasValue ? r.ReviewDate.Value.ToString("MMM dd, yyyy") : "N/A"
+                        date = r.ReviewDate.HasValue ? r.ReviewDate.Value.ToString("MMM dd, yyyy") : "N/A",
+                        criteria = r.ReviewCriteriaRatings
+                            .OrderBy(x => x.Criteria.SortOrder)
+                            .ThenBy(x => x.CriteriaId)
+                            .Select(x => new { name = x.Criteria.CriteriaName, score = x.Score })
+                            .ToList()
                     })
                     .ToListAsync();
 
@@ -2934,8 +3005,10 @@ namespace Fyp_Backend.Controllers
                         id = r.ReviewId.ToString(),
                         reviewerName = r.reviewerName,
                         reviewerImage = r.reviewerImage,
+                        endType = r.endType,
                         rating = r.rating,
                         comment = r.comment,
+                        criteria = r.criteria,
                         date = r.date,
                         workedFrom = window.From?.ToString("yyyy-MM-dd"),
                         workedTo = window.To?.ToString("yyyy-MM-dd"),
@@ -3068,6 +3141,190 @@ namespace Fyp_Backend.Controllers
             {
                 return StatusCode(500, new { message = "Error updating radius: " + ex.Message });
             }
+        }
+
+        // ─── CRITERIA-BASED CLOSING REVIEWS ─────────────────────────────────────
+        // The profession a review is about is derived, never stored:
+        //   Interview -> Worker -> Worker_Category -> Category -> ReviewCriteria
+        // so no Category_ID column is needed on Interview or Reviews.
+
+        /// <summary>
+        /// Returns the criteria the client must score when closing the contract
+        /// behind <paramref name="interviewId"/>: the common set plus every
+        /// criterion belonging to a category that worker holds.
+        /// </summary>
+        [HttpGet("GetReviewCriteria")]
+        public async Task<IActionResult> GetReviewCriteria([FromQuery] int interviewId)
+        {
+            try
+            {
+                var workerId = await _context.Interviews
+                    .Where(i => i.InterviewId == interviewId)
+                    .Select(i => i.WorkerId)
+                    .FirstOrDefaultAsync();
+
+                if (workerId == null)
+                    return NotFound(new { message = "Interview not found." });
+
+                var criteria = await LoadApplicableCriteriaAsync(workerId.Value);
+
+                var common = criteria
+                    .Where(c => c.CategoryId == null)
+                    .Select(c => new { criteriaId = c.CriteriaId, name = c.CriteriaName })
+                    .ToList();
+
+                var professions = criteria
+                    .Where(c => c.CategoryId != null)
+                    .GroupBy(c => new { c.CategoryId, c.CategoryName })
+                    .Select(g => new
+                    {
+                        categoryId = g.Key.CategoryId,
+                        categoryName = g.Key.CategoryName,
+                        criteria = g.Select(c => new { criteriaId = c.CriteriaId, name = c.CriteriaName }).ToList()
+                    })
+                    .ToList();
+
+                return Ok(new
+                {
+                    interviewId,
+                    workerId,
+                    common,
+                    professions,
+                    totalCriteria = common.Count + professions.Sum(p => p.criteria.Count),
+                    allMandatory = true
+                });
+            }
+            catch (Exception ex)
+            {
+                return StatusCode(500, new { message = "Error loading review criteria: " + ex.Message });
+            }
+        }
+
+        /// <summary>
+        /// Every active criterion that applies to this worker: the common set
+        /// (CategoryId == null) plus each criterion scoped to a category the
+        /// worker actually holds.
+        /// </summary>
+        private async Task<List<CriteriaProjection>> LoadApplicableCriteriaAsync(int workerId)
+        {
+            // Worker_Category is a (worker, category, skill) triple, so a worker with
+            // three skills in one category still resolves to exactly one distinct
+            // category here. Distinct() also covers the rare multi-category worker.
+            var categoryIds = await _context.WorkerCategories
+                .Where(wc => wc.WorkerId == workerId)
+                .Select(wc => wc.CategoryId)
+                .Distinct()
+                .ToListAsync();
+
+            return await _context.ReviewCriteria
+                .Where(c => c.IsActive && (c.CategoryId == null || categoryIds.Contains(c.CategoryId!.Value)))
+                .OrderBy(c => c.CategoryId)   // NULLs first in SQL Server => common criteria lead
+                .ThenBy(c => c.SortOrder)
+                .Select(c => new CriteriaProjection
+                {
+                    CriteriaId = c.CriteriaId,
+                    CategoryId = c.CategoryId,
+                    CategoryName = c.Category != null ? c.Category.CategoryName : null,
+                    CriteriaName = c.CriteriaName,
+                    SortOrder = c.SortOrder
+                })
+                .ToListAsync();
+        }
+
+        /// <summary>
+        /// Validates the submitted scores against the worker's applicable criteria
+        /// (all mandatory, nothing extra, each 1-5) and returns the rows to persist
+        /// plus the overall average that goes into Reviews.Rating.
+        /// </summary>
+        private async Task<CriteriaBuildResult> BuildCriteriaRatingsAsync(
+            int? interviewId, List<CriteriaScoreDto> submitted)
+        {
+            var result = new CriteriaBuildResult();
+
+            var workerId = await _context.Interviews
+                .Where(i => i.InterviewId == interviewId)
+                .Select(i => i.WorkerId)
+                .FirstOrDefaultAsync();
+
+            if (workerId == null)
+            {
+                result.Error = "Interview or its worker could not be found.";
+                return result;
+            }
+
+            var applicable = await LoadApplicableCriteriaAsync(workerId.Value);
+            var requiredIds = applicable.Select(c => c.CriteriaId).ToHashSet();
+            var submittedIds = submitted.Select(s => s.CriteriaId).ToHashSet();
+
+            if (submitted.Count == 0)
+            {
+                result.Error = "No criteria scores were submitted.";
+                return result;
+            }
+
+            var missing = requiredIds.Except(submittedIds).ToList();
+            if (missing.Count > 0)
+            {
+                result.Error = "Please rate every criterion. Missing criteria: " + string.Join(", ", missing);
+                return result;
+            }
+
+            var unexpected = submittedIds.Except(requiredIds).ToList();
+            if (unexpected.Count > 0)
+            {
+                result.Error = "Criteria that do not apply to this worker were submitted: " + string.Join(", ", unexpected);
+                return result;
+            }
+
+            if (submittedIds.Count != submitted.Count)
+            {
+                result.Error = "The same criterion was scored more than once.";
+                return result;
+            }
+
+            if (submitted.Any(s => s.Score < 1 || s.Score > 5))
+            {
+                result.Error = "Each criterion must be scored between 1 and 5.";
+                return result;
+            }
+
+            result.Rows = submitted
+                .Select(s => new ReviewCriteriaRating { CriteriaId = s.CriteriaId, Score = s.Score })
+                .ToList();
+
+            // Overall = mean of the criteria scores, rounded to 2dp to fit decimal(3,2).
+            result.Average = Math.Round((decimal)submitted.Average(s => s.Score), 2);
+            return result;
+        }
+
+        public class CriteriaScoreDto
+        {
+            public int CriteriaId { get; set; }
+            public int Score { get; set; }
+        }
+
+        /// <summary>Body for the two client-side closing reviews.</summary>
+        public class ClosingReviewRequest
+        {
+            public int InterviewId { get; set; }
+            public string? Comment { get; set; }
+            public List<CriteriaScoreDto> CriteriaScores { get; set; } = new();
+        }
+
+        public class CriteriaBuildResult
+        {
+            public decimal Average { get; set; }
+            public List<ReviewCriteriaRating> Rows { get; set; } = new();
+            public string? Error { get; set; }
+        }
+
+        public class CriteriaProjection
+        {
+            public int CriteriaId { get; set; }
+            public int? CategoryId { get; set; }
+            public string? CategoryName { get; set; }
+            public string CriteriaName { get; set; } = null!;
+            public int SortOrder { get; set; }
         }
 
     }
