@@ -12,6 +12,7 @@ namespace Fyp_Backend.Controllers
     //  GET  api/Police/GetWorkerDetails/{workerId}            → worker + existing certificate (for renew)
     //  POST api/Police/IssueCharacterCertificate             → issue / renew (police only)
     //  GET  api/Police/GetWorkerCharacterCertificate/{id}     → the current certificate (client + worker view)
+    //GET
     [Route("api/[controller]")]
     [ApiController]
     [Authorize] // every police endpoint needs a valid token
