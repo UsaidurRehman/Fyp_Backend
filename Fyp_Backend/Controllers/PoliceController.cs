@@ -141,7 +141,8 @@ namespace Fyp_Backend.Controllers
 
         // ── Issue OR renew a character certificate (one active row per worker) ──
         [HttpPost("IssueCharacterCertificate")]
-        public async Task<IActionResult> IssueCharacterCertificate([FromBody] IssueCertificateDto model)
+        //public async Task<IActionResult> IssueCharacterCertificate([FromBody] IssueCertificateDto model)
+        public async Task<IActionResult> IssueCharacterCertificate([FromBody] PoliceCharacterCertificateRequest model)
         {
             if (model == null || model.WorkerId <= 0)
                 return BadRequest(new { message = "A valid Worker ID is required." });
@@ -268,7 +269,16 @@ namespace Fyp_Backend.Controllers
             }
         }
 
-        public class IssueCertificateDto
+        //public class IssueCertificateDto
+        //{
+        //    public int WorkerId { get; set; }
+        //    public string? CertificateNo { get; set; }
+        //    public string CharacterStatus { get; set; } = string.Empty;
+        //    public string? Remarks { get; set; }
+        //    public string? VerifiedCnic { get; set; }
+        //    public bool CnicVerified { get; set; }
+        //}
+        public class PoliceCharacterCertificateRequest
         {
             public int WorkerId { get; set; }
             public string? CertificateNo { get; set; }

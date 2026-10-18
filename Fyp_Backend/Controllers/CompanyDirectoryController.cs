@@ -466,7 +466,8 @@ namespace Fyp_Backend.Controllers
 
         [Authorize(Roles = "Company")]
         [HttpPost("IssueCertificate")]
-        public async Task<IActionResult> IssueCertificate([FromBody] IssueCertificateDto dto)
+        //public async Task<IActionResult> IssueCertificate([FromBody] IssueCertificateDto dto)
+        public async Task<IActionResult> IssueCertificate([FromBody] CompanyCertificateRequest dto)
         {
             try
             {
@@ -598,7 +599,14 @@ namespace Fyp_Backend.Controllers
         }
     }
 
-    public class IssueCertificateDto
+    //public class IssueCertificateDto
+    //{
+    //    public int WorkerId { get; set; }
+    //    public int CompanyId { get; set; }
+    //    public string CertificateTitle { get; set; }
+    //    public string TrainingEvaluationNotes { get; set; }
+    //}
+    public class CompanyCertificateRequest
     {
         public int WorkerId { get; set; }
         public int CompanyId { get; set; }

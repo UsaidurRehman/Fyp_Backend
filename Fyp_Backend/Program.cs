@@ -14,6 +14,7 @@ builder.Services.AddControllers()
         options.JsonSerializerOptions.Converters.Add(new DateOnlyJsonConverter());
     });
 
+
 builder.Services.AddOpenApi(); // This is the new .NET 9 default
 builder.Services.AddSwaggerGen();
 

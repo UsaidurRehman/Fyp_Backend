@@ -330,7 +330,8 @@ namespace Fyp_Backend.Controllers
         }
 
         [HttpPost("SignupCompany")]
-        public async Task<IActionResult> SignupCompany([FromForm] Company model, [FromForm] IFormFile? LogoFile)
+        [Consumes("multipart/form-data")]
+        public async Task<IActionResult> SignupCompany( [FromForm] Company model,IFormFile? LogoFile)
         {
             try
             {
@@ -364,7 +365,8 @@ namespace Fyp_Backend.Controllers
         }
 
         [HttpPost("UpdateCompany")]
-        public async Task<IActionResult> UpdateCompany([FromForm] Company model, [FromForm] IFormFile? LogoFile)
+        [Consumes("multipart/form-data")]
+        public async Task<IActionResult> UpdateCompany([FromForm] Company model,IFormFile? LogoFile)
         {
             try
             {
