@@ -1,4 +1,5 @@
 using Fyp_Backend.Models;
+using Fyp_Backend.Services;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
@@ -17,6 +18,16 @@ namespace Fyp_Backend.Controllers
         public DashboardController(Fyp1Context context)
         {
             _context = context;
+        }
+
+        private int? ActorId => int.TryParse(User.FindFirstValue(ClaimTypes.NameIdentifier)
+            ?? User.FindFirstValue("sub"), out var id) && id > 0 ? id : null;
+
+        private ObjectResult WorkflowFailure(Exception ex)
+        {
+            HttpContext?.RequestServices.GetService<ILogger<DashboardController>>()?
+                .LogError(ex, "Resignation workflow request failed");
+            return StatusCode(500, new { message = "The resignation request could not be completed. Check that the resignation SQL update is applied, then retry." });
         }
 
         [HttpGet]
@@ -1017,6 +1028,7 @@ namespace Fyp_Backend.Controllers
                     r.ResignationId,
                     r.SubmittedDate,
                     r.LastWorkingDate,
+                    r.AcceptedAtUtc,
                     r.ResignationReason
                 })
                 .ToListAsync();
@@ -1046,20 +1058,28 @@ namespace Fyp_Backend.Controllers
                     .FirstOrDefault();
                 var resignation = resignations
                     .Where(r => r.InterviewId == id)
-                    .OrderByDescending(r => r.SubmittedDate)
+                    .OrderByDescending(r => r.AcceptedAtUtc.HasValue)
+                    .ThenByDescending(r => r.AcceptedAtUtc ?? r.SubmittedDate)
                     .ThenByDescending(r => r.ResignationId)
                     .FirstOrDefault();
 
                 DateTime? to = null;
-                if (termination?.TerminatedDate is DateOnly terminatedDate)
+                if (resignation?.AcceptedAtUtc is DateTime acceptedAt &&
+                    string.Equals(interview?.Status, "Resigned", StringComparison.OrdinalIgnoreCase))
+                {
+                    to = ResignationWorkflowService.BusinessDate(acceptedAt).ToDateTime(TimeOnly.MinValue);
+                }
+                else if (termination?.TerminatedDate is DateOnly terminatedDate)
                 {
                     to = terminatedDate.ToDateTime(TimeOnly.MinValue);
                 }
                 else if (resignation != null)
                 {
-                    to = resignation.LastWorkingDate != default
-                        ? resignation.LastWorkingDate.ToDateTime(TimeOnly.MinValue)
-                        : resignation.SubmittedDate;
+                    to = resignation.AcceptedAtUtc.HasValue
+                        ? ResignationWorkflowService.BusinessDate(resignation.AcceptedAtUtc.Value).ToDateTime(TimeOnly.MinValue)
+                        : resignation.LastWorkingDate != default
+                            ? resignation.LastWorkingDate.ToDateTime(TimeOnly.MinValue)
+                            : resignation.SubmittedDate;
                 }
 
                 if (to == null && fallbackEndDates != null && fallbackEndDates.TryGetValue(id, out var reviewDate))
@@ -1632,7 +1652,7 @@ namespace Fyp_Backend.Controllers
 
         [HttpGet("GetClientDashboard")]
         [Authorize(Roles = "Client")]
-        public async Task<IActionResult> GetClientDashboard()
+        public async Task<IActionResult> GetClientDashboard([FromServices] ResignationWorkflowService workflow, CancellationToken ct = default)
         {
             try
             {
@@ -1641,6 +1661,8 @@ namespace Fyp_Backend.Controllers
                 {
                     return BadRequest(new { message = "Invalid user session token context." });
                 }
+
+                await workflow.ProcessDueAsync(clientId: clientId, ct: ct);
 
                 // 1. Calculate active pending initial interview inquiries
                 int pendingCount = await _context.Interviews
@@ -1655,11 +1677,11 @@ namespace Fyp_Backend.Controllers
                     h.Interview.Status != "Terminated" && h.Interview.Status != "Resigned" &&
                     h.Interview.Status != "Completed");
 
-                // Match the resignation list's confirmed/reviewed rule. A terminated
-                // contract cannot be confirmed as a resignation, so it needs no dot.
+                // Pending notices and automatically accepted notices awaiting a
+                // real Client review need attention. Terminated contracts do not.
                 int pendingResignationsCount = await _context.Resignations.CountAsync(r =>
                     r.Interview != null && r.Interview.ClientId == clientId &&
-                    r.Interview.Status != "Resigned" && r.Interview.Status != "Terminated" &&
+                    (r.Interview.Status != "Resigned" || r.AcceptanceMode == "Automatic") && r.Interview.Status != "Terminated" &&
                     !_context.Reviews.Any(review => review.InterviewId == r.InterviewId &&
                         review.ReviewerRole == "Client"));
 
@@ -1668,7 +1690,8 @@ namespace Fyp_Backend.Controllers
                     .CountAsync(h => h.Interview!.ClientId == clientId &&
                                      h.WorkerDecision == "Accepted" &&
                                      h.HiringDecision == "Accepted" &&
-                                     h.Interview.Status != "Terminated");
+                                     h.Interview.Status != "Terminated" && h.Interview.Status != "Resigned" &&
+                                     h.Interview.Status != "Completed");
 
                 // 3. Compile backend dashboard structured payload data
                 var workersList = await _context.Hiring
@@ -1697,10 +1720,15 @@ namespace Fyp_Backend.Controllers
                         status = h.Interview!.Status == "ResignationPending" ? "Pending Resignation"
                                 : h.Interview!.Status == "Resigned" ? "Resigned"
                                 : h.Interview!.Status == "Terminated" ? "Terminated"
+                                : h.Interview!.Status == "Completed" ? "Completed"
                                 : "On Work",
+                        resignationId = _context.Resignations.Where(r => r.InterviewId == h.InterviewId)
+                            .OrderByDescending(r => r.SubmittedDate).ThenByDescending(r => r.ResignationId)
+                            .Select(r => (int?)r.ResignationId).FirstOrDefault(),
                         type = h.Interview!.Status == "ResignationPending" ? "alert"
                              : h.Interview!.Status == "Resigned" ? "resigned"
                              : h.Interview!.Status == "Terminated" ? "terminated"
+                             : h.Interview!.Status == "Completed" ? "completed"
                              : "active"
                     })
                     .ToListAsync();
@@ -2243,10 +2271,14 @@ namespace Fyp_Backend.Controllers
         }
 
         [HttpGet("GetActiveJob/{workerId}")]
-        public async Task<IActionResult> GetActiveJob(int workerId)
+        [Authorize(Roles = "Worker")]
+        public async Task<IActionResult> GetActiveJob(int workerId, [FromServices] ResignationWorkflowService workflow, CancellationToken ct = default)
         {
+            if (ActorId is not int authenticatedId) return Unauthorized();
+            if (authenticatedId != workerId) return Forbid();
             try
             {
+                await workflow.ProcessDueAsync(workerId: workerId, ct: ct);
                 var activeInterview = await _context.Interviews
                     .Include(i => i.Client)
                     .Where(i => i.WorkerId == workerId &&
@@ -2274,7 +2306,16 @@ namespace Fyp_Backend.Controllers
                         interviewId = x.Interview.InterviewId,
                         employerName = x.Interview.Client != null ? x.Interview.Client.Name : "Unknown Employer",
                         employerAddress = x.Interview.Client != null ? x.Interview.Client.Address : "N/A",
-                        hireDate = x.Interview.InterviewDate
+                        hireDate = x.Interview.InterviewDate,
+                        resignationWorkflowVersion = 2,
+                        noticeDays = 7,
+                        isResignationPending = x.Interview.Status == "ResignationPending",
+                        resignationId = _context.Resignations.Where(r => r.InterviewId == x.Interview.InterviewId)
+                            .OrderByDescending(r => r.SubmittedDate).ThenByDescending(r => r.ResignationId)
+                            .Select(r => (int?)r.ResignationId).FirstOrDefault(),
+                        noticeEndsAtUtc = _context.Resignations.Where(r => r.InterviewId == x.Interview.InterviewId)
+                            .OrderByDescending(r => r.SubmittedDate).ThenByDescending(r => r.ResignationId)
+                            .Select(r => r.NoticeEndsAtUtc).FirstOrDefault()
                     })
                     .FirstOrDefaultAsync();
 
@@ -2370,60 +2411,33 @@ namespace Fyp_Backend.Controllers
             }
         }
         [HttpPost("SubmitResignation")]
-        public async Task<IActionResult> SubmitResignation([FromBody] Resignation model)
+        [Authorize(Roles = "Worker")]
+        public async Task<IActionResult> SubmitResignation([FromBody] Resignation model,
+            [FromServices] ResignationWorkflowService workflow, CancellationToken ct = default)
         {
+            if (ActorId is not int workerId) return Unauthorized();
             try
             {
-                if (model == null || string.IsNullOrEmpty(model.ResignationReason))
-                    return BadRequest(new { message = "Resignation reason is required." });
-
-                // Load interview AND its worker so we can update both
-                var interview = await _context.Interviews
-                    .Include(i => i.Worker)
-                    .FirstOrDefaultAsync(i => i.InterviewId == model.InterviewId);
-
-                if (interview == null)
-                    return NotFound(new { message = "Job record not found." });
-
-                var alreadyResigned = await _context.Resignations
-                    .AnyAsync(r => r.InterviewId == model.InterviewId);
-                if (alreadyResigned)
-                    return BadRequest(new { message = "You have already submitted a resignation for this job." });
-
-                // 1. Insert the resignation notice record
-                var resignation = new Resignation
+                var notice = await workflow.SubmitAsync(workerId, model.InterviewId ?? 0, model.ResignationReason, ct);
+                return Ok(new
                 {
-                    InterviewId = model.InterviewId,
-                    ResignationReason = model.ResignationReason,
-                    LastWorkingDate = model.LastWorkingDate,
-                    SubmittedDate = DateTime.Now
-                };
-                _context.Resignations.Add(resignation);
-
-                // 2. Keep the resignation in a pending state until the client confirms it
-                interview.Status = "ResignationPending";
-
-                // 3. Free up the worker so they appear in search results again
-                if (interview.Worker != null)
-                {
-                    interview.Worker.AvailableStatus = true;
-                }
-
-                await _context.SaveChangesAsync();
-
-                return Ok(new { message = "Resignation submitted successfully." });
+                    message = "Resignation submitted. You can review your client after acceptance.",
+                    resignationId = notice.ResignationId,
+                    interviewId = notice.InterviewId,
+                    noticeDays = ResignationWorkflowService.NoticeDays,
+                    noticeEndsAtUtc = notice.NoticeEndsAtUtc,
+                    lastWorkingDate = notice.LastWorkingDate,
+                    status = "ResignationPending"
+                });
             }
-            catch (Exception ex)
-            {
-                var finalMsg = ex.InnerException?.InnerException?.Message
-                               ?? ex.InnerException?.Message
-                               ?? ex.Message;
-                return StatusCode(500, new { message = "DB Error: " + finalMsg });
-            }
+            catch (ResignationWorkflowException ex) { return StatusCode(ex.StatusCode, new { message = ex.Message }); }
+            catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }
+            catch (Exception ex) { return WorkflowFailure(ex); }
         }
 
         [HttpGet("GetClientResignations")]
-        public async Task<IActionResult> GetClientResignations()
+        [Authorize(Roles = "Client")]
+        public async Task<IActionResult> GetClientResignations([FromServices] ResignationWorkflowService workflow, CancellationToken ct = default)
         {
             try
             {
@@ -2434,6 +2448,7 @@ namespace Fyp_Backend.Controllers
                     return Unauthorized(new { message = "Invalid user session." });
 
                 int clientId = int.Parse(userIdStr);
+                await workflow.ProcessDueAsync(clientId: clientId, ct: ct);
 
                 var data = await _context.Resignations
                     .Include(r => r.Interview)
@@ -2455,8 +2470,8 @@ namespace Fyp_Backend.Controllers
                         .FirstOrDefaultAsync() ?? "Worker";
 
                     int interviewId = r.InterviewId ?? 0;
-                    var clientConfirmed = r.Interview?.Status == "Resigned"
-                        || await _context.Reviews.AnyAsync(rev => rev.InterviewId == interviewId && rev.ReviewerRole == "Client");
+                    var hasClientReview = await _context.Reviews.AnyAsync(rev => rev.InterviewId == interviewId && rev.ReviewerRole == "Client", ct);
+                    var clientConfirmed = r.Interview?.Status == "Resigned" || hasClientReview;
                     var hasWorkerReview = await _context.Reviews.AnyAsync(rev => rev.InterviewId == interviewId && rev.ReviewerRole == "Worker");
 
                     results.Add(new
@@ -2465,6 +2480,12 @@ namespace Fyp_Backend.Controllers
                         interviewId = interviewId,
                         status = r.Interview?.Status ?? "Pending",
                         isConfirmed = clientConfirmed,
+                        isAccepted = ResignationWorkflowService.IsAccepted(r),
+                        reviewSubmitted = hasClientReview,
+                        canAccept = !ResignationWorkflowService.IsEnded(r.Interview?.Status),
+                        acceptanceMode = r.AcceptanceMode,
+                        acceptedAtUtc = r.AcceptedAtUtc,
+                        noticeEndsAtUtc = r.NoticeEndsAtUtc,
                         hasWorkerReview = hasWorkerReview,
                         workerName = r.Interview?.Worker?.Name ?? "Unknown Worker",
                         workerRole = workerRole,
@@ -2483,14 +2504,17 @@ namespace Fyp_Backend.Controllers
         }
 
         [HttpGet("GetResignationDetail/{id}")]
-        public async Task<IActionResult> GetResignationDetail(int id)
+        [Authorize(Roles = "Client")]
+        public async Task<IActionResult> GetResignationDetail(int id, [FromServices] ResignationWorkflowService workflow, CancellationToken ct = default)
         {
+            if (ActorId is not int clientId) return Unauthorized();
             try
             {
+                await workflow.ProcessDueAsync(clientId: clientId, ct: ct);
                 var resignation = await _context.Resignations
                     .Include(r => r.Interview)
                         .ThenInclude(i => i.Worker) // Removed .ThenInclude(w => w.Category)
-                    .FirstOrDefaultAsync(r => r.ResignationId == id);
+                    .FirstOrDefaultAsync(r => r.ResignationId == id && r.Interview != null && r.Interview.ClientId == clientId, ct);
 
                 if (resignation == null)
                     return NotFound(new { message = "Resignation not found." });
@@ -2499,7 +2523,7 @@ namespace Fyp_Backend.Controllers
 
                 // Fetch the category name via the junction table safely
                 var workerRole = await _context.WorkerCategories
-                    .Where(wc => wc.WorkerId == worker.WorkerId)
+                    .Where(wc => wc.WorkerId == (worker != null ? worker.WorkerId : 0))
                     .Join(_context.Categories, wc => wc.CategoryId, c => c.CategoryId, (wc, c) => c.CategoryName)
                     .FirstOrDefaultAsync() ?? "Worker";
 
@@ -2516,6 +2540,15 @@ namespace Fyp_Backend.Controllers
                 double progress = 1.0 - ((double)remainingDays / totalNoticeDays);
                 if (progress > 1) progress = 1;
                 if (progress < 0) progress = 0;
+                var isAccepted = ResignationWorkflowService.IsAccepted(resignation);
+                if (resignation.NoticeEndsAtUtc.HasValue)
+                {
+                    totalNoticeDays = ResignationWorkflowService.NoticeDays;
+                    var secondsLeft = (resignation.NoticeEndsAtUtc.Value - workflow.UtcNow).TotalSeconds;
+                    remainingDays = isAccepted ? 0 : Math.Max(0, (int)Math.Ceiling(secondsLeft / 86400d));
+                    progress = isAccepted ? 1 : Math.Clamp(1 - secondsLeft / (7d * 86400d), 0, 1);
+                }
+                else if (isAccepted) { remainingDays = 0; progress = 1; }
 
                 // Only the CLIENT's own closing review counts as "the client confirmed this".
                 // The old check had no ReviewerRole filter, so the review the WORKER wrote while
@@ -2527,8 +2560,8 @@ namespace Fyp_Backend.Controllers
 
                 bool isConfirmed = resignation.Interview?.Status == "Resigned" || hasClientReview;
 
-                // Both sides of the story for this contract, so the screen can show what the
-                // worker said about the client when they resigned.
+                // Both sides of this contract's story. Legacy reviews submitted
+                // before acceptance remain visible; new Worker reviews come later.
                 int contractId = resignation.InterviewId ?? 0;
 
                 var contractReviews = await _context.Reviews
@@ -2605,6 +2638,11 @@ namespace Fyp_Backend.Controllers
                     progress = Math.Round(progress, 2),
                     status = resignation.Interview?.Status ?? "Pending",
                     isConfirmed = isConfirmed,
+                    isAccepted,
+                    canAccept = !ResignationWorkflowService.IsEnded(resignation.Interview?.Status),
+                    acceptanceMode = resignation.AcceptanceMode,
+                    acceptedAtUtc = resignation.AcceptedAtUtc,
+                    noticeEndsAtUtc = resignation.NoticeEndsAtUtc,
                     reviewSubmitted = hasClientReview,
                     workerReview = workerReview,
                     clientReview = clientReview,
@@ -2618,89 +2656,55 @@ namespace Fyp_Backend.Controllers
         }
 
         [HttpPost("ConfirmResignation")]
-        public async Task<IActionResult> ConfirmResignation([FromBody] ClosingReviewRequest model)
+        [Authorize(Roles = "Client")]
+        public async Task<IActionResult> ConfirmResignation([FromBody] ClosingReviewRequest model,
+            [FromServices] ResignationWorkflowService workflow, CancellationToken ct = default)
         {
-            using var transaction = await _context.Database.BeginTransactionAsync();
+            if (ActorId is not int clientId) return Unauthorized();
             try
             {
-                var interview = await _context.Interviews.FindAsync(model.InterviewId);
-                if (interview == null) return NotFound(new { message = "Interview record not found." });
-
-                // The client may only confirm a resignation that actually exists…
-                var resignation = await _context.Resignations
-                    .Where(r => r.InterviewId == model.InterviewId)
-                    .OrderByDescending(r => r.SubmittedDate)
-                    .FirstOrDefaultAsync();
-
-                if (resignation == null)
-                    return NotFound(new { message = "No resignation is on record for this contract." });
-
-                if (interview.Status == "Resigned")
-                    return BadRequest(new { message = "This resignation has already been confirmed." });
-
-                if (interview.Status == "Terminated")
-                    return BadRequest(new { message = "This contract was terminated, there is no resignation to confirm." });
-
-                // …and only once, with one closing review (a re-opened screen used to be
-                // able to write a second rating for the same contract).
-                var alreadyReviewed = await _context.Reviews.AnyAsync(r =>
-                    r.InterviewId == model.InterviewId && r.ReviewerRole == "Client");
-                if (alreadyReviewed)
-                    return BadRequest(new { message = "You have already reviewed this worker for this contract." });
-
-                // Validate and score the per-criterion ratings before writing anything.
-                var criteria = await BuildCriteriaRatingsAsync(model.InterviewId, model.CriteriaScores);
-                if (criteria.Error != null)
-                    return BadRequest(new { message = criteria.Error });
-
-                // EF fills in Review_ID on the children through the navigation property,
-                // so a single SaveChanges writes the review and its criteria rows together.
-                var review = new Review
-                {
-                    InterviewId = model.InterviewId,
-                    Rating = criteria.Average,
-                    Comment = model.Comment,
-                    ReviewerRole = "Client",
-                    ReviewDate = DateTime.Now,
-                    ReviewCriteriaRatings = criteria.Rows
-                };
-                _context.Reviews.Add(review);
-
-                interview.Status = "Resigned";
-
-                await _context.SaveChangesAsync();
-                await transaction.CommitAsync();
-
+                await workflow.ProcessDueAsync(clientId: clientId, ct: ct);
+                var notice = await workflow.ConfirmWithClientReviewAsync(clientId, model.InterviewId,
+                    model.ResignationId, async () =>
+                    {
+                        if (string.IsNullOrWhiteSpace(model.Comment))
+                            throw new ResignationWorkflowException(400, "Please enter review remarks before confirming.");
+                        var criteria = await BuildCriteriaRatingsAsync(model.InterviewId, model.CriteriaScores ?? new());
+                        if (criteria.Error != null) throw new ResignationWorkflowException(400, criteria.Error);
+                        return new Review { Rating = criteria.Average, Comment = model.Comment.Trim(), ReviewCriteriaRatings = criteria.Rows };
+                    }, ct);
                 return Ok(new
                 {
-                    message = "Resignation confirmed and worker record updated.",
-                    interviewId = model.InterviewId,
-                    status = interview.Status,
-                    rating = review.Rating,
-                    comment = review.Comment,
-                    confirmedDate = review.ReviewDate
+                    message = notice.AcceptanceMode == "Automatic"
+                        ? "The resignation was automatically accepted. Your review is now saved."
+                        : "Resignation confirmed. Your review of the worker is saved.",
+                    interviewId = notice.InterviewId,
+                    resignationId = notice.ResignationId,
+                    status = "Resigned",
+                    notice.AcceptedAtUtc,
+                    notice.AcceptanceMode
                 });
             }
-            catch (Exception ex)
-            {
-                await transaction.RollbackAsync();
-                return StatusCode(500, new { message = "Error: " + ex.Message });
-            }
+            catch (ResignationWorkflowException ex) { return StatusCode(ex.StatusCode, new { message = ex.Message }); }
+            catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }
+            catch (Exception ex) { return WorkflowFailure(ex); }
         }
 
         [HttpPost("TerminateContract")]
-        public async Task<IActionResult> TerminateContract([FromBody] TerminationRequest request)
+        [Authorize(Roles = "Client")]
+        public async Task<IActionResult> TerminateContract([FromBody] TerminationRequest request, [FromServices] ResignationWorkflowService workflow, CancellationToken ct = default)
         {
-            using var transaction = await _context.Database.BeginTransactionAsync();
+            if (ActorId is not int clientId) return Unauthorized();
+            await using var transaction = await workflow.BeginUnitAsync(ct);
             try
             {
                 // 1. Locate the Interview via the associated Hiring ID trace
-                var interview = await _context.Interviews.FindAsync(request.InterviewId);
-                if (interview == null) return NotFound(new { message = "Job record not found." });
+                var interview = await workflow.LockInterviewAsync(request.InterviewId, ct);
+                if (interview == null || interview.ClientId != clientId) return NotFound(new { message = "Job record not found." });
 
                 // Contract can only be closed once, and only with one closing review —
                 // otherwise a double tap produced two Termination rows plus two ratings.
-                if (interview.Status == "Terminated")
+                if (ResignationWorkflowService.IsEnded(interview.Status))
                     return BadRequest(new { message = "This contract has already been terminated." });
 
                 var alreadyReviewed = await _context.Reviews.AnyAsync(r =>
@@ -2739,13 +2743,13 @@ namespace Fyp_Backend.Controllers
                 _context.Terminations.Add(termination);
 
                 await _context.SaveChangesAsync();
-                await transaction.CommitAsync();
+                await transaction.CommitAsync(ct);
 
                 return Ok(new { message = "Contract terminated successfully." });
             }
             catch (Exception ex)
             {
-                await transaction.RollbackAsync();
+                // Disposing the workflow unit rolls back any uncommitted SQL writes.
                 return StatusCode(500, new { message = "Error: " + ex.Message });
             }
         }
@@ -2944,42 +2948,67 @@ namespace Fyp_Backend.Controllers
             public List<CriteriaScoreDto> CriteriaScores { get; set; } = new();
         }
 
-        [HttpPost("SubmitWorkerReviewToClient")]
-        public async Task<IActionResult> SubmitWorkerReviewToClient([FromBody] Review model)
+        [HttpGet("GetWorkerResignationReview/{id}")]
+        [Authorize(Roles = "Worker")]
+        public async Task<IActionResult> GetWorkerResignationReview(int id,
+            [FromServices] ResignationWorkflowService workflow, CancellationToken ct = default)
         {
+            if (ActorId is not int workerId) return Unauthorized();
             try
             {
-                var userIdStr = User.FindFirst(ClaimTypes.NameIdentifier)?.Value
-                             ?? User.FindFirst(System.IdentityModel.Tokens.Jwt.JwtRegisteredClaimNames.Sub)?.Value;
-                if (string.IsNullOrEmpty(userIdStr)) return Unauthorized(new { message = "Invalid user session." });
-
-                var interview = await _context.Interviews.FindAsync(model.InterviewId);
-                if (interview == null) return NotFound(new { message = "Record not found." });
-
-                // One review per side per contract: without this a double tap (or a re-opened
-                // screen) stacked the same rating on the same job several times.
-                var alreadyReviewed = await _context.Reviews.AnyAsync(r =>
-                    r.InterviewId == model.InterviewId && r.ReviewerRole == "Worker");
-                if (alreadyReviewed)
-                    return BadRequest(new { message = "You have already reviewed this client for this contract." });
-
-                var review = new Review
+                await workflow.ProcessDueAsync(workerId: workerId, ct: ct);
+                var notice = await _context.Resignations.AsNoTracking().Include(r => r.Interview).ThenInclude(i => i!.Client)
+                    .FirstOrDefaultAsync(r => r.ResignationId == id && r.Interview != null && r.Interview.WorkerId == workerId, ct);
+                if (notice?.InterviewId is not int interviewId) return NotFound(new { message = "Resignation not found." });
+                var review = await _context.Reviews.AsNoTracking().Where(r => r.InterviewId == interviewId && r.ReviewerRole == "Worker")
+                    .OrderByDescending(r => r.ReviewDate).ThenByDescending(r => r.ReviewId).FirstOrDefaultAsync(ct);
+                var accepted = ResignationWorkflowService.IsAccepted(notice);
+                var windows = await LoadContractWindowsAsync(new List<int> { interviewId },
+                    new Dictionary<int, DateTime?> { { interviewId, review?.ReviewDate } });
+                windows.TryGetValue(interviewId, out var window);
+                return Ok(new
                 {
-                    InterviewId = model.InterviewId,
-                    Rating = model.Rating,
-                    Comment = model.Comment,
-                    ReviewerRole = "Worker",
-                    ReviewDate = DateTime.Now
-                };
-                _context.Reviews.Add(review);
-                await _context.SaveChangesAsync();
+                    resignationId = id,
+                    interviewId,
+                    clientName = notice.Interview!.Client?.Name ?? "Client",
+                    clientPicture = notice.Interview.Client?.Picture,
+                    reason = notice.ResignationReason,
+                    status = notice.Interview.Status,
+                    isAccepted = accepted,
+                    canReview = accepted && review == null,
+                    notice.AcceptedAtUtc,
+                    notice.AcceptanceMode,
+                    notice.NoticeEndsAtUtc,
+                    workerReview = review == null ? null : new
+                    {
+                        rating = review.Rating,
+                        comment = review.Comment ?? "",
+                        date = review.ReviewDate?.ToString("MMM dd, yyyy"),
+                        workedPeriod = FormatWorkedPeriod(window.From, window.To),
+                        endReasonType = window.EndReasonType,
+                        endReason = window.EndReason
+                    }
+                });
+            }
+            catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }
+            catch (Exception ex) { return WorkflowFailure(ex); }
+        }
 
-                return Ok(new { message = "Review submitted successfully." });
-            }
-            catch (Exception ex)
+        [HttpPost("SubmitWorkerReviewToClient")]
+        [Authorize(Roles = "Worker")]
+        public async Task<IActionResult> SubmitWorkerReviewToClient([FromBody] Review model,
+            [FromServices] ResignationWorkflowService workflow, CancellationToken ct = default)
+        {
+            if (ActorId is not int workerId) return Unauthorized();
+            try
             {
-                return StatusCode(500, new { message = "Error: " + ex.Message });
+                await workflow.ProcessDueAsync(workerId: workerId, ct: ct);
+                var review = await workflow.SubmitWorkerReviewAsync(workerId, model.InterviewId ?? 0, model.Rating, model.Comment, ct);
+                return Ok(new { message = "Review submitted successfully.", reviewId = review.ReviewId });
             }
+            catch (ResignationWorkflowException ex) { return StatusCode(ex.StatusCode, new { message = ex.Message }); }
+            catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }
+            catch (Exception ex) { return WorkflowFailure(ex); }
         }
 
         [HttpGet("GetClientProfile/{clientId}")]
@@ -3415,6 +3444,7 @@ namespace Fyp_Backend.Controllers
         public class ClosingReviewRequest
         {
             public int InterviewId { get; set; }
+            public int? ResignationId { get; set; }
             public string? Comment { get; set; }
             public List<CriteriaScoreDto> CriteriaScores { get; set; } = new();
         }

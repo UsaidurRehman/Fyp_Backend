@@ -4,13 +4,14 @@ using Microsoft.EntityFrameworkCore;
 
 namespace Fyp_Backend.Services;
 
-public sealed class WorkerNotificationService(Fyp1Context db)
+public sealed class WorkerNotificationService(Fyp1Context db, ResignationWorkflowService workflow)
 {
     // Existing source tables do not have reliable event-created timestamps.
     // CreatedAtUtc records when this center first observes a source event, not
     // the scheduled interview date. Stable keys prevent duplicates on refresh.
     public async Task SynchronizeAsync(int workerId, CancellationToken cancellationToken = default)
     {
+        await workflow.ProcessDueAsync(workerId: workerId, ct: cancellationToken);
         var observedAt = DateTime.UtcNow;
         var candidates = new List<WorkerNotification>();
         var interviews = await db.Interviews.AsNoTracking()
@@ -29,9 +30,7 @@ public sealed class WorkerNotificationService(Fyp1Context db)
             .Where(h => h.Interview != null && h.Interview.WorkerId == workerId)
             .Select(h => new
             {
-                h.HiringId,
-                h.InterviewId,
-                h.HiringDecision,
+                h.HiringId, h.InterviewId, h.HiringDecision,
                 ClientName = h.Interview!.Client != null ? h.Interview.Client.Name : null
             }).ToListAsync(cancellationToken);
         foreach (var h in jobs)
@@ -53,9 +52,7 @@ public sealed class WorkerNotificationService(Fyp1Context db)
             .Where(t => t.Interview != null && t.Interview.WorkerId == workerId)
             .Select(t => new
             {
-                t.TerminationId,
-                t.InterviewId,
-                t.TerminatedReason,
+                t.TerminationId, t.InterviewId, t.TerminatedReason,
                 ClientName = t.Interview!.Client != null ? t.Interview.Client.Name : null
             }).ToListAsync(cancellationToken);
         foreach (var t in terminations)
@@ -65,6 +62,16 @@ public sealed class WorkerNotificationService(Fyp1Context db)
             candidates.Add(New($"termination:{t.TerminationId}", "termination", t.TerminationId,
                 t.InterviewId, "Contract terminated", $"{name} ended your contract. {reason}"));
         }
+
+        var acceptedNotices = await db.Resignations.AsNoTracking()
+            .Where(r => r.Interview != null && r.Interview.WorkerId == workerId &&
+                r.Interview.Status == "Resigned" && r.AcceptedAtUtc != null)
+            .Select(r => new { r.ResignationId, r.InterviewId, r.AcceptanceMode,
+                HasReview = db.Reviews.Any(review => review.InterviewId == r.InterviewId && review.ReviewerRole == "Worker") })
+            .ToListAsync(cancellationToken);
+        foreach (var r in acceptedNotices)
+            candidates.Add(ResignationWorkflowService.AcceptanceNotice(workerId, r.ResignationId,
+                r.InterviewId, r.AcceptanceMode, r.HasReview, observedAt));
 
         // Another device/server may discover the same events concurrently. The
         // composite PK is the final guard; retry only SQL duplicate-key failures.
@@ -91,14 +98,9 @@ public sealed class WorkerNotificationService(Fyp1Context db)
         WorkerNotification New(string key, string type, int sourceId, int? interviewId, string title, string message)
             => new()
             {
-                WorkerId = workerId,
-                NotificationKey = key,
-                Type = type,
-                SourceId = sourceId,
-                InterviewId = interviewId,
-                Title = title,
-                Message = message,
-                CreatedAtUtc = observedAt
+                WorkerId = workerId, NotificationKey = key, Type = type,
+                SourceId = sourceId, InterviewId = interviewId, Title = title,
+                Message = message, CreatedAtUtc = observedAt
             };
     }
 }

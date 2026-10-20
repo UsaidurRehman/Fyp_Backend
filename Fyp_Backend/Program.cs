@@ -56,7 +56,10 @@ builder.Services.AddCors(options =>
 var provider = builder.Services.BuildServiceProvider();
 var config = provider.GetRequiredService<IConfiguration>();
 builder.Services.AddDbContext<Fyp1Context>(items => items.UseSqlServer(config.GetConnectionString("fyp1")));
+builder.Services.AddSingleton<TimeProvider>(TimeProvider.System);
+builder.Services.AddScoped<ResignationWorkflowService>();
 builder.Services.AddScoped<WorkerNotificationService>();
+builder.Services.AddHostedService<ResignationExpiryWorker>();
 var app = builder.Build();
 
 // Configure the HTTP request pipeline.

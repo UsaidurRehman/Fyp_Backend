@@ -473,7 +473,26 @@ public partial class Fyp1Context : DbContext
         });
 
 
-       OnModelCreatingPartial(modelBuilder);
+        var utc = new ValueConverter<DateTime, DateTime>(v => v,
+            v => DateTime.SpecifyKind(v, DateTimeKind.Utc));
+        modelBuilder.Entity<Resignation>(entity =>
+        {
+            entity.Property(r => r.NoticeEndsAtUtc).HasColumnType("datetime2(7)").HasConversion(utc);
+            entity.Property(r => r.AcceptedAtUtc).HasColumnType("datetime2(7)").HasConversion(utc);
+            entity.Property(r => r.AcceptanceMode).HasMaxLength(16).IsUnicode(false);
+            entity.HasIndex(r => new { r.NoticeEndsAtUtc, r.ResignationId })
+                .IncludeProperties(r => new { r.AcceptedAtUtc, r.InterviewId })
+                .HasFilter("[NoticeEndsAtUtc] IS NOT NULL AND [AcceptedAtUtc] IS NULL")
+                .HasDatabaseName("IX_Resignation_DueNotice");
+            // Legacy duplicates are retained. Only newly submitted workflow rows
+            // participate in this guard; one resignation per contract as before.
+            entity.HasIndex(r => r.InterviewId).IsUnique()
+                .HasFilter("[NoticeEndsAtUtc] IS NOT NULL AND [Interview_ID] IS NOT NULL")
+                .HasDatabaseName("UX_Resignation_NewWorkflowContract");
+        });
+
+
+        OnModelCreatingPartial(modelBuilder);
     }
 
     partial void OnModelCreatingPartial(ModelBuilder modelBuilder);
