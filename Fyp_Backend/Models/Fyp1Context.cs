@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
 
 namespace Fyp_Backend.Models;
 
@@ -44,6 +45,7 @@ public partial class Fyp1Context : DbContext
     public virtual DbSet<Course> Courses { get; set; }
     public virtual DbSet<CourseEnrollment> CourseEnrollments { get; set; }
     public virtual DbSet<CourseCertificate> CourseCertificates { get; set; }
+    public virtual DbSet<WorkerNotification> WorkerNotifications { get; set; } = null!;
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
@@ -447,7 +449,31 @@ public partial class Fyp1Context : DbContext
             entity.HasOne(e => e.Company).WithMany().HasForeignKey(e => e.CompanyID).OnDelete(DeleteBehavior.Restrict);
         });
 
-        OnModelCreatingPartial(modelBuilder);
+        modelBuilder.Entity<WorkerNotification>(entity =>
+        {
+            entity.ToTable("WorkerNotification", "dbo");
+            entity.HasKey(n => new { n.WorkerId, n.NotificationKey })
+                .HasName("PK_WorkerNotification");
+            entity.Property(n => n.NotificationKey).HasMaxLength(96).IsUnicode(false);
+            entity.Property(n => n.Type).HasMaxLength(20).IsUnicode(false);
+            entity.Property(n => n.Title).HasMaxLength(160);
+            entity.Property(n => n.Message).HasColumnType("nvarchar(max)");
+            // SQL datetime2 does not retain DateTime.Kind. Restore UTC when reading
+            // so mobile clients receive a Z suffix instead of assuming local time.
+            var utc = new ValueConverter<DateTime, DateTime>(value => value,
+                value => DateTime.SpecifyKind(value, DateTimeKind.Utc));
+            entity.Property(n => n.CreatedAtUtc).HasColumnType("datetime2(7)").HasConversion(utc);
+            entity.Property(n => n.ReadAtUtc).HasColumnType("datetime2(7)").HasConversion(utc);
+            entity.HasIndex(n => new { n.WorkerId, n.CreatedAtUtc, n.NotificationKey })
+                .IsDescending(false, true, true).HasDatabaseName("IX_WorkerNotification_Feed");
+            entity.HasIndex(n => new { n.WorkerId, n.ReadAtUtc })
+                .HasDatabaseName("IX_WorkerNotification_Unread");
+            entity.HasOne<Worker>().WithMany().HasForeignKey(n => n.WorkerId)
+                .OnDelete(DeleteBehavior.Cascade).HasConstraintName("FK_WorkerNotification_Worker");
+        });
+
+
+       OnModelCreatingPartial(modelBuilder);
     }
 
     partial void OnModelCreatingPartial(ModelBuilder modelBuilder);

@@ -1,5 +1,6 @@
 using System.Text;
 using Fyp_Backend.Models;
+using Fyp_Backend.Services;
 using Microsoft.AspNetCore.Authentication.JwtBearer;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.IdentityModel.Tokens;
@@ -55,6 +56,7 @@ builder.Services.AddCors(options =>
 var provider = builder.Services.BuildServiceProvider();
 var config = provider.GetRequiredService<IConfiguration>();
 builder.Services.AddDbContext<Fyp1Context>(items => items.UseSqlServer(config.GetConnectionString("fyp1")));
+builder.Services.AddScoped<WorkerNotificationService>();
 var app = builder.Build();
 
 // Configure the HTTP request pipeline.

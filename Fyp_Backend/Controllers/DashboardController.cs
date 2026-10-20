@@ -478,6 +478,8 @@ namespace Fyp_Backend.Controllers
                         r.clientId,
                         r.reviewerName,
                         r.endType,
+                        endReasonType = window.EndReasonType,
+                        endReason = window.EndReason,
                         r.rating,
                         r.comment,
                         r.criteria,
@@ -499,10 +501,6 @@ namespace Fyp_Backend.Controllers
                     .ThenBy(wh => wh.Habit!.Name)
                     .Select(wh => new { id = wh.Habit!.HabitId, name = wh.Habit!.Name })
                     .ToListAsync();
-
-                int pendingRequestCount = worker.Interviews.Count(i => i.WorkerDecision == null || i.WorkerDecision == "Pending");
-                int jobNotificationCount = await _context.Hiring.CountAsync(h => h.Interview.WorkerId == worker.WorkerId && h.WorkerDecision == "Pending");
-                int terminationCount = worker.Interviews.Count(i => i.Status == "Terminated");
 
                 // Fetch junction skills
                 var junctionData = await _context.WorkerCategories
@@ -574,9 +572,6 @@ namespace Fyp_Backend.Controllers
                     availableStatus = worker.AvailableStatus ?? false,
                     rating = avgRating.ToString("F1"),
                     reviewCount = allReviews.Count,
-                    pendingRequestCount = pendingRequestCount,
-                    jobNotificationCount = jobNotificationCount,
-                    terminationCount = terminationCount,
                     hasActiveInterview = hasActiveInterview,
                     activeInterviewStatus = activeInterviewStatus,
 
@@ -992,14 +987,13 @@ namespace Fyp_Backend.Controllers
             return span + (days <= 1 ? " (1 day)" : $" ({days} days)");
         }
 
-        // One extra round trip for every interview currently on screen:
-        //   start = Hiring.Hiring_Date        (falls back to Interview.InterviewDate)
-        //   end   = Termination.TerminatedDate, else Resignation.LastWorkingDate
-        //           (falls back to Resignation.SubmittedDate, then the review date)
-        private async Task<Dictionary<int, (DateTime? From, DateTime? To)>> LoadContractWindowsAsync(
+        // Batch the lifetime and ending reason for the contracts behind these reviews.
+        // Reasons are selected by InterviewId, never by the worker's latest job.
+        // Reuse the existing queries so rendering more cards does not add per-review reads.
+        private async Task<Dictionary<int, (DateTime? From, DateTime? To, string? EndReasonType, string? EndReason)>> LoadContractWindowsAsync(
             List<int> interviewIds, Dictionary<int, DateTime?> fallbackEndDates)
         {
-            var windows = new Dictionary<int, (DateTime? From, DateTime? To)>();
+            var windows = new Dictionary<int, (DateTime? From, DateTime? To, string? EndReasonType, string? EndReason)>();
             if (interviewIds == null || interviewIds.Count == 0) return windows;
 
             var hireDates = (await _context.Hiring
@@ -1009,58 +1003,96 @@ namespace Fyp_Backend.Controllers
                 .GroupBy(x => x.InterviewId)
                 .ToDictionary(g => g.Key, g => g.Min(x => x.HiringDate));
 
-            var interviewDates = (await _context.Interviews
+            var interviews = (await _context.Interviews
                 .Where(i => interviewIds.Contains(i.InterviewId))
-                .Select(i => new { i.InterviewId, i.InterviewDate })
+                .Select(i => new { i.InterviewId, i.InterviewDate, i.Status })
                 .ToListAsync())
-                .ToDictionary(x => x.InterviewId, x => x.InterviewDate);
+                .ToDictionary(x => x.InterviewId);
 
             var resignations = await _context.Resignations
                 .Where(r => r.InterviewId != null && interviewIds.Contains(r.InterviewId.Value))
-                .Select(r => new { InterviewId = r.InterviewId!.Value, r.SubmittedDate, r.LastWorkingDate })
+                .Select(r => new
+                {
+                    InterviewId = r.InterviewId!.Value,
+                    r.ResignationId,
+                    r.SubmittedDate,
+                    r.LastWorkingDate,
+                    r.ResignationReason
+                })
                 .ToListAsync();
 
             var terminations = await _context.Terminations
                 .Where(t => t.InterviewId != null && interviewIds.Contains(t.InterviewId.Value))
-                .Select(t => new { InterviewId = t.InterviewId!.Value, t.TerminatedDate })
+                .Select(t => new
+                {
+                    InterviewId = t.InterviewId!.Value,
+                    t.TerminationId,
+                    t.TerminatedDate,
+                    t.TerminatedReason
+                })
                 .ToListAsync();
 
             foreach (var id in interviewIds.Distinct())
             {
+                interviews.TryGetValue(id, out var interview);
                 DateTime? from = hireDates.TryGetValue(id, out var hireDate) ? hireDate : null;
-                if (from == null && interviewDates.TryGetValue(id, out var interviewDate)) from = interviewDate;
+                if (from == null) from = interview?.InterviewDate;
+
+                // Deterministic selection also handles legacy rows with null dates.
+                var termination = terminations
+                    .Where(t => t.InterviewId == id)
+                    .OrderByDescending(t => t.TerminatedDate)
+                    .ThenByDescending(t => t.TerminationId)
+                    .FirstOrDefault();
+                var resignation = resignations
+                    .Where(r => r.InterviewId == id)
+                    .OrderByDescending(r => r.SubmittedDate)
+                    .ThenByDescending(r => r.ResignationId)
+                    .FirstOrDefault();
 
                 DateTime? to = null;
-
-                var termination = terminations
-                    .Where(t => t.InterviewId == id && t.TerminatedDate != null)
-                    .OrderByDescending(t => t.TerminatedDate)
-                    .FirstOrDefault();
-                if (termination != null)
+                if (termination?.TerminatedDate is DateOnly terminatedDate)
                 {
-                    to = termination.TerminatedDate!.Value.ToDateTime(TimeOnly.MinValue);
+                    to = terminatedDate.ToDateTime(TimeOnly.MinValue);
                 }
-                else
+                else if (resignation != null)
                 {
-                    var resignation = resignations
-                        .Where(r => r.InterviewId == id)
-                        .OrderByDescending(r => r.SubmittedDate)
-                        .FirstOrDefault();
-                    if (resignation != null)
-                    {
-                        to = resignation.LastWorkingDate != default
-                            ? resignation.LastWorkingDate.ToDateTime(TimeOnly.MinValue)
-                            : resignation.SubmittedDate;
-                    }
+                    to = resignation.LastWorkingDate != default
+                        ? resignation.LastWorkingDate.ToDateTime(TimeOnly.MinValue)
+                        : resignation.SubmittedDate;
                 }
 
                 if (to == null && fallbackEndDates != null && fallbackEndDates.TryGetValue(id, out var reviewDate))
                     to = reviewDate;
 
-                if (from != null || to != null) windows[id] = (from, to);
+                var endReasonType = ResolveReviewEndReasonType(
+                    interview?.Status, termination != null, resignation != null);
+                // An explicit ending type must never borrow the other model's reason.
+                string? endReason = endReasonType == "Terminated"
+                    ? termination?.TerminatedReason
+                    : endReasonType == "Resigned" ? resignation?.ResignationReason : null;
+                endReason = string.IsNullOrWhiteSpace(endReason) ? null : endReason.Trim();
+
+                windows[id] = (from, to, endReasonType, endReason);
             }
 
             return windows;
+        }
+
+        private static string? ResolveReviewEndReasonType(
+            string? status, bool hasTermination, bool hasResignation)
+        {
+            var normalizedStatus = status?.Trim();
+            if (string.Equals(normalizedStatus, "Terminated", StringComparison.OrdinalIgnoreCase))
+                return "Terminated";
+            if (string.Equals(normalizedStatus, "Resigned", StringComparison.OrdinalIgnoreCase) ||
+                string.Equals(normalizedStatus, "ResignationPending", StringComparison.OrdinalIgnoreCase))
+                return "Resigned";
+
+            // Old rows may lack an ending status; use only this contract's records.
+            if (hasTermination) return "Terminated";
+            if (hasResignation) return "Resigned";
+            return null;
         }
 
         //    [HttpGet("GetWorkerDetail/{id}")]
@@ -1307,6 +1339,8 @@ namespace Fyp_Backend.Controllers
                         r.clientId,
                         r.name,
                         r.endType,
+                        endReasonType = window.EndReasonType,
+                        endReason = window.EndReason,
                         r.rating,
                         r.comment,
                         r.criteria,
@@ -1597,6 +1631,7 @@ namespace Fyp_Backend.Controllers
         //}
 
         [HttpGet("GetClientDashboard")]
+        [Authorize(Roles = "Client")]
         public async Task<IActionResult> GetClientDashboard()
         {
             try
@@ -1610,6 +1645,23 @@ namespace Fyp_Backend.Controllers
                 // 1. Calculate active pending initial interview inquiries
                 int pendingCount = await _context.Interviews
                     .CountAsync(i => i.ClientId == clientId && i.Status == "Pending");
+
+                // Dots indicate outstanding client work, not unseen/read history.
+                // Offers still waiting for a worker and finalized/closed offers do not count.
+                int pendingJobRequestsCount = await _context.Hiring.CountAsync(h =>
+                    h.Interview != null && h.Interview.ClientId == clientId &&
+                    h.HiringDecision == "Pending" &&
+                    (h.WorkerDecision == "Accepted" || h.WorkerDecision == "Rejected") &&
+                    h.Interview.Status != "Terminated" && h.Interview.Status != "Resigned" &&
+                    h.Interview.Status != "Completed");
+
+                // Match the resignation list's confirmed/reviewed rule. A terminated
+                // contract cannot be confirmed as a resignation, so it needs no dot.
+                int pendingResignationsCount = await _context.Resignations.CountAsync(r =>
+                    r.Interview != null && r.Interview.ClientId == clientId &&
+                    r.Interview.Status != "Resigned" && r.Interview.Status != "Terminated" &&
+                    !_context.Reviews.Any(review => review.InterviewId == r.InterviewId &&
+                        review.ReviewerRole == "Client"));
 
                 // 2. Count only workers who are not fully terminated
                 int workersCount = await _context.Hiring
@@ -1657,6 +1709,8 @@ namespace Fyp_Backend.Controllers
                 {
                     hiredCount = workersCount,
                     pendingInterviewsCount = pendingCount,
+                    pendingJobRequestsCount,
+                    pendingResignationsCount,
                     hiredWorkers = workersList
                 });
             }
@@ -1733,7 +1787,8 @@ namespace Fyp_Backend.Controllers
         }
 
         [HttpGet("GetWorkerRequests")]
-        public async Task<IActionResult> GetWorkerRequests()
+        [Authorize(Roles = "Worker")]
+        public async Task<IActionResult> GetWorkerRequests([FromQuery] int? interviewId = null)
         {
             try
             {
@@ -1743,16 +1798,23 @@ namespace Fyp_Backend.Controllers
                 if (string.IsNullOrEmpty(userIdStr))
                     return Unauthorized(new { message = "Invalid user session." });
 
-                int workerId = int.Parse(userIdStr);
+                if (!int.TryParse(userIdStr, out int workerId) || workerId <= 0) return Unauthorized();
+                if (interviewId.HasValue && interviewId.Value <= 0) return BadRequest();
 
                 var pendingRequests = await _context.Interviews
                     .Include(i => i.Client)
-                    .Where(i => i.WorkerId == workerId && (i.WorkerDecision == null || i.WorkerDecision == "Pending"))
+                    .Where(i => i.WorkerId == workerId && (interviewId.HasValue
+                        ? i.InterviewId == interviewId.Value
+                        : i.WorkerDecision == null || i.WorkerDecision == "Pending"))
                     .Select(i => new
                     {
                         id = i.InterviewId.ToString(),
                         client = i.Client != null ? i.Client.Name : "Unknown Client",
-                        clientId = i.Client.ClientId,
+                        clientId = i.Client != null ? i.Client.ClientId : (int?)null,
+                        workerDecision = i.WorkerDecision ?? "Pending",
+                        status = i.Status,
+                        canRespond = (i.WorkerDecision == null || i.WorkerDecision == "Pending") &&
+                            (i.Status == null || i.Status == "Pending" || i.Status == "Scheduled" || i.Status == "Requested"),
                         location = i.Address ?? "N/A",
                         timeRaw = i.InterviewDate,
                         time = i.InterviewDate != null ? i.InterviewDate.Value.ToString("MMM dd, hh:mm tt") : "Not Set",
@@ -1823,6 +1885,7 @@ namespace Fyp_Backend.Controllers
         }
 
         [HttpPut("UpdateWorkerDecision/{id}")]
+        [Authorize(Roles = "Worker")]
         public async Task<IActionResult> UpdateWorkerDecision(int id, [FromBody] Interview model)
         {
             try
@@ -1860,7 +1923,8 @@ namespace Fyp_Backend.Controllers
         }
 
         [HttpGet("GetWorkerJobConfirmations")]
-        public async Task<IActionResult> GetWorkerJobConfirmations()
+        [Authorize(Roles = "Worker")]
+        public async Task<IActionResult> GetWorkerJobConfirmations([FromQuery] int? hiringId = null)
         {
             try
             {
@@ -1870,17 +1934,21 @@ namespace Fyp_Backend.Controllers
                 if (string.IsNullOrEmpty(userIdStr))
                     return Unauthorized(new { message = "Invalid user session." });
 
-                int workerId = int.Parse(userIdStr);
+                if (!int.TryParse(userIdStr, out int workerId) || workerId <= 0) return Unauthorized();
+                if (hiringId.HasValue && hiringId.Value <= 0) return BadRequest();
 
                 var jobs = await _context.Hiring
                     .Include(h => h.Interview)
                         .ThenInclude(i => i.Client)
                     .Include(h => h.Interview)
                         .ThenInclude(i => i.Worker)
-                    .Where(h => h.Interview.WorkerId == workerId)
+                    .Where(h => h.Interview != null && h.Interview.WorkerId == workerId &&
+                        (!hiringId.HasValue || h.HiringId == hiringId.Value))
                     .Select(h => new
                     {
                         id = h.InterviewId.ToString(),
+                        hiringId = h.HiringId,
+                        interviewId = h.InterviewId,
                         clientName = h.Interview.Client != null ? h.Interview.Client.Name : "Client",
                         clientId = h.Interview.Client != null ? h.Interview.Client.ClientId : (int?)null,
                         status = h.Interview.Status,
@@ -1954,25 +2022,34 @@ namespace Fyp_Backend.Controllers
                     string type;
                     string msg;
                     string displayStatus;
-                    if (item.workerDecision == "Rejected")
+                    var workerDecision = item.workerDecision.Trim();
+                    var hiringDecision = item.hiringDecision.Trim();
+                    var contractStatus = item.status?.Trim();
+                    if (string.Equals(workerDecision, "Rejected", StringComparison.OrdinalIgnoreCase))
                     {
                         type = "rejected";
                         msg = "Thank you for your time. Job offer declined.";
                         displayStatus = "Rejected";
                     }
-                    else if (item.status == "Terminated")
+                    else if (string.Equals(hiringDecision, "Rejected", StringComparison.OrdinalIgnoreCase))
+                    {
+                        type = "rejected";
+                        msg = "The client decided not to proceed with this job.";
+                        displayStatus = "Rejected";
+                    }
+                    else if (string.Equals(contractStatus, "Terminated", StringComparison.OrdinalIgnoreCase))
                     {
                         type = "terminated";
                         msg = "Your contract has been terminated by the client.";
                         displayStatus = "Terminated";
                     }
-                    else if (item.hiringDecision == "Accepted")
+                    else if (string.Equals(hiringDecision, "Accepted", StringComparison.OrdinalIgnoreCase))
                     {
                         type = "final";
                         msg = "Congratulations! You are officially hired. Welcome aboard!";
                         displayStatus = "Hired";
                     }
-                    else if (item.workerDecision == "Accepted")
+                    else if (string.Equals(workerDecision, "Accepted", StringComparison.OrdinalIgnoreCase))
                     {
                         type = "accepted";
                         msg = "Job offer accepted. Awaiting client response.";
@@ -1987,6 +2064,8 @@ namespace Fyp_Backend.Controllers
                     return new
                     {
                         id = item.id,
+                        hiringId = item.hiringId,
+                        interviewId = item.interviewId,
                         clientId = item.clientId, // <-- ADD THIS LINE
                         clientName = item.clientName,
                         clientRating = item.clientRating,
@@ -2017,11 +2096,17 @@ namespace Fyp_Backend.Controllers
         }
 
         [HttpPut("WorkerAcceptJobOffer/{id}")]
-        public async Task<IActionResult> WorkerAcceptJobOffer(int id)
+        [Authorize(Roles = "Worker")]
+        public async Task<IActionResult> WorkerAcceptJobOffer(int id, [FromQuery] int? hiringId = null)
         {
             try
             {
-                var hiring = await _context.Hiring.Include(h => h.Interview).FirstOrDefaultAsync(h => h.InterviewId == id);
+                var rawId = User.FindFirstValue(ClaimTypes.NameIdentifier) ?? User.FindFirstValue("sub");
+                if (!int.TryParse(rawId, out int workerId) || workerId <= 0) return Unauthorized();
+                if (id <= 0 || (hiringId.HasValue && hiringId.Value <= 0)) return BadRequest();
+                var hiring = await _context.Hiring.Include(h => h.Interview).FirstOrDefaultAsync(h =>
+                    h.InterviewId == id && h.Interview != null && h.Interview.WorkerId == workerId &&
+                    (!hiringId.HasValue || h.HiringId == hiringId.Value));
                 if (hiring == null) return NotFound(new { message = "Hiring context job offer record not found." });
 
                 // Rule 2c: if worker accepted but user not responded, workerDecision will be accepted and rest are pending.
@@ -2037,11 +2122,17 @@ namespace Fyp_Backend.Controllers
         }
 
         [HttpPut("WorkerRejectJobOffer/{id}")]
-        public async Task<IActionResult> WorkerRejectJobOffer(int id)
+        [Authorize(Roles = "Worker")]
+        public async Task<IActionResult> WorkerRejectJobOffer(int id, [FromQuery] int? hiringId = null)
         {
             try
             {
-                var hiring = await _context.Hiring.Include(h => h.Interview).FirstOrDefaultAsync(h => h.InterviewId == id);
+                var rawId = User.FindFirstValue(ClaimTypes.NameIdentifier) ?? User.FindFirstValue("sub");
+                if (!int.TryParse(rawId, out int workerId) || workerId <= 0) return Unauthorized();
+                if (id <= 0 || (hiringId.HasValue && hiringId.Value <= 0)) return BadRequest();
+                var hiring = await _context.Hiring.Include(h => h.Interview).FirstOrDefaultAsync(h =>
+                    h.InterviewId == id && h.Interview != null && h.Interview.WorkerId == workerId &&
+                    (!hiringId.HasValue || h.HiringId == hiringId.Value));
                 if (hiring == null) return NotFound(new { message = "Hiring context record not found." });
 
                 // Rule 2b: worker rejection shifts the tracking record cleanly
@@ -2474,6 +2565,9 @@ namespace Fyp_Backend.Controllers
                 {
                     workerReview = new
                     {
+                        endType = resignation.Interview?.Status,
+                        endReasonType = contractWindow.EndReasonType,
+                        endReason = contractWindow.EndReason,
                         rating = workerReviewRow.Rating ?? 0,
                         comment = workerReviewRow.Comment ?? "",
                         date = workerReviewRow.ReviewDate?.ToString("MMM dd, yyyy") ?? "N/A",
@@ -2487,6 +2581,9 @@ namespace Fyp_Backend.Controllers
                 {
                     clientReview = new
                     {
+                        endType = resignation.Interview?.Status,
+                        endReasonType = contractWindow.EndReasonType,
+                        endReason = contractWindow.EndReason,
                         rating = clientReviewRow.Rating ?? 0,
                         comment = clientReviewRow.Comment ?? "",
                         date = clientReviewRow.ReviewDate?.ToString("MMM dd, yyyy") ?? "N/A",
@@ -2695,15 +2792,22 @@ namespace Fyp_Backend.Controllers
         }
 
         [HttpGet("GetLatestTermination/{workerId}")]
-        public async Task<IActionResult> GetLatestTermination(int workerId)
+        [Authorize(Roles = "Worker")]
+        public async Task<IActionResult> GetLatestTermination(int workerId, [FromQuery] int? terminationId = null)
         {
             try
             {
+                var rawId = User.FindFirstValue(ClaimTypes.NameIdentifier) ?? User.FindFirstValue("sub");
+                if (!int.TryParse(rawId, out int authenticatedId) || authenticatedId <= 0) return Unauthorized();
+                if (authenticatedId != workerId) return Forbid();
+                if (terminationId.HasValue && terminationId.Value <= 0) return BadRequest();
                 var termination = await _context.Terminations
                     .Include(t => t.Interview)
                         .ThenInclude(i => i.Client)
-                    .Where(t => t.Interview.WorkerId == workerId)
+                    .Where(t => t.Interview != null && t.Interview.WorkerId == workerId &&
+                        (!terminationId.HasValue || t.TerminationId == terminationId.Value))
                     .OrderByDescending(t => t.TerminatedDate)
+                    .ThenByDescending(t => t.TerminationId)
                     .Select(t => new
                     {
                         t.TerminationId,
@@ -2924,6 +3028,8 @@ namespace Fyp_Backend.Controllers
                         id = r.ReviewId.ToString(),
                         reviewerName = r.reviewerName,
                         endType = r.endType,
+                        endReasonType = window.EndReasonType,
+                        endReason = window.EndReason,
                         rating = r.rating,
                         comment = r.comment,
                         criteria = r.criteria,
@@ -3006,6 +3112,8 @@ namespace Fyp_Backend.Controllers
                         reviewerName = r.reviewerName,
                         reviewerImage = r.reviewerImage,
                         endType = r.endType,
+                        endReasonType = window.EndReasonType,
+                        endReason = window.EndReason,
                         rating = r.rating,
                         comment = r.comment,
                         criteria = r.criteria,
