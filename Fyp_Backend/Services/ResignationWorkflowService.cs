@@ -75,15 +75,30 @@ public sealed class ResignationWorkflowService(Fyp1Context db, TimeProvider cloc
         var end = now.AddDays(NoticeDays);
         var notice = new Resignation
         {
-            InterviewId = interviewId, ResignationReason = reason.Trim(),
-            SubmittedDate = BusinessLocal(now), LastWorkingDate = BusinessDate(end),
+            InterviewId = interviewId,
+            ResignationReason = reason.Trim(),
+            SubmittedDate = BusinessLocal(now),
+            LastWorkingDate = BusinessDate(end),
             NoticeEndsAtUtc = end
         };
         db.Resignations.Add(notice);
         interview.Status = "ResignationPending";
-        // Do not change the worker's duty/search preference or prematurely free
-        // an ongoing contract. The pending contract is still active.
+        // Persist the resignation first. For an exclusive full-time contract,
+        // resignation submission releases its availability lock immediately.
         await db.SaveChangesAsync(ct);
+        if (interview.JobType == "Full-Time" && interview.IsExclusive)
+        {
+            var anotherExclusiveJob = await db.Hiring.AnyAsync(h => h.HiringDecision == "Accepted"
+                && h.Interview != null && h.Interview.WorkerId == workerId
+                && h.Interview.InterviewId != interviewId
+                && h.Interview.JobType == "Full-Time" && h.Interview.IsExclusive
+                && h.Interview.Status != "Resigned" && h.Interview.Status != "Terminated"
+                && h.Interview.Status != "Completed"
+                && !db.Resignations.Any(r => r.InterviewId == h.InterviewId), ct);
+            var worker = await db.Workers.FirstOrDefaultAsync(w => w.WorkerId == workerId, ct);
+            if (worker != null) worker.AvailableStatus = !anotherExclusiveJob;
+            await db.SaveChangesAsync(ct);
+        }
         await unit.CommitAsync(ct);
         return notice;
     }
@@ -164,13 +179,19 @@ public sealed class ResignationWorkflowService(Fyp1Context db, TimeProvider cloc
         string? mode, bool hasReview, DateTime createdAtUtc)
     {
         var automatic = mode == "Automatic";
-        return new WorkerNotification { WorkerId = workerId,
-            NotificationKey = $"resignation:{resignationId}:accepted", Type = "resignation",
-            SourceId = resignationId, InterviewId = interviewId, CreatedAtUtc = createdAtUtc,
+        return new WorkerNotification
+        {
+            WorkerId = workerId,
+            NotificationKey = $"resignation:{resignationId}:accepted",
+            Type = "resignation",
+            SourceId = resignationId,
+            InterviewId = interviewId,
+            CreatedAtUtc = createdAtUtc,
             Title = automatic ? "Resignation automatically accepted" : "Resignation accepted",
             Message = hasReview ? "Your resignation is accepted. Open your saved client review."
                 : automatic ? "Your seven-day notice period ended. Your resignation was automatically accepted. You can now review your client."
-                : "Your client accepted your resignation. You can now review your client." };
+                : "Your client accepted your resignation. You can now review your client."
+        };
     }
 
     private async Task EnsureAcceptanceNoticeAsync(Resignation notice, Interview interview, CancellationToken ct)
@@ -210,8 +231,14 @@ public sealed class ResignationWorkflowService(Fyp1Context db, TimeProvider cloc
             throw new ResignationWorkflowException(409, "You can review the client only after the resignation is accepted or the contract is terminated.");
         if (await db.Reviews.AnyAsync(r => r.InterviewId == interviewId && r.ReviewerRole == "Worker", ct))
             throw new ResignationWorkflowException(400, "You have already reviewed this client for this contract.");
-        var review = new Review { InterviewId = interviewId, Rating = rating.Value,
-            Comment = comment?.Trim(), ReviewerRole = "Worker", ReviewDate = BusinessLocal(UtcNow) };
+        var review = new Review
+        {
+            InterviewId = interviewId,
+            Rating = rating.Value,
+            Comment = comment?.Trim(),
+            ReviewerRole = "Worker",
+            ReviewDate = BusinessLocal(UtcNow)
+        };
         db.Reviews.Add(review);
         await db.SaveChangesAsync(ct);
         await unit.CommitAsync(ct);

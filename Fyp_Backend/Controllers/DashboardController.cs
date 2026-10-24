@@ -23,6 +23,23 @@ namespace Fyp_Backend.Controllers
         private int? ActorId => int.TryParse(User.FindFirstValue(ClaimTypes.NameIdentifier)
             ?? User.FindFirstValue("sub"), out var id) && id > 0 ? id : null;
 
+        private Task<bool> HasActiveExclusiveFullTimeJobAsync(int workerId, int? excludingInterviewId = null)
+            => _context.Hiring.AnyAsync(h => h.HiringDecision == "Accepted" && h.Interview != null
+                && h.Interview.WorkerId == workerId
+                && h.Interview.JobType == "Full-Time" && h.Interview.IsExclusive
+                && h.Interview.Status != "Resigned" && h.Interview.Status != "Terminated"
+                && h.Interview.Status != "Completed"
+                && (!excludingInterviewId.HasValue || h.InterviewId != excludingInterviewId.Value)
+                && !_context.Resignations.Any(r => r.InterviewId == h.InterviewId));
+
+        private Task<bool> HasActiveFullTimeJobAsync(int workerId, int? excludingInterviewId = null)
+            => _context.Hiring.AnyAsync(h => h.HiringDecision == "Accepted" && h.Interview != null
+                && h.Interview.WorkerId == workerId && h.Interview.JobType == "Full-Time"
+                && h.Interview.Status != "Resigned" && h.Interview.Status != "Terminated"
+                && h.Interview.Status != "Completed"
+                && (!excludingInterviewId.HasValue || h.InterviewId != excludingInterviewId.Value)
+                && !_context.Resignations.Any(r => r.InterviewId == h.InterviewId));
+
         private ObjectResult WorkflowFailure(Exception ex)
         {
             HttpContext?.RequestServices.GetService<ILogger<DashboardController>>()?
@@ -1454,11 +1471,33 @@ namespace Fyp_Backend.Controllers
             }
         }
 
+        public sealed class BookInterviewRequest
+        {
+            public int? WorkerId { get; set; }
+            public DateTime? InterviewDate { get; set; }
+            public string? Address { get; set; }
+            public int? SlotId { get; set; }
+            public bool? IsResidenceProvided { get; set; }
+            [System.Text.Json.Serialization.JsonPropertyName("IsExclusive")]
+            public bool IsExclusive { get; set; }
+        }
+
         [HttpPost("BookInterview")]
-        public async Task<IActionResult> BookInterview([FromBody] Interview model)
+        public async Task<IActionResult> BookInterview([FromBody] BookInterviewRequest request)
         {
             try
             {
+                // Bind only fields accepted from the app; never bind the EF entity directly.
+                var model = new Interview
+                {
+                    WorkerId = request.WorkerId,
+                    InterviewDate = request.InterviewDate,
+                    Address = request.Address,
+                    SlotId = request.SlotId,
+                    IsResidenceProvided = request.IsResidenceProvided,
+                    IsExclusive = request.IsExclusive
+                };
+
                 // ─── 1. The client always comes from the JWT, never from the body ──
                 var userIdStr = User.FindFirst(ClaimTypes.NameIdentifier)?.Value
                              ?? User.FindFirst(System.IdentityModel.Tokens.Jwt.JwtRegisteredClaimNames.Sub)?.Value;
@@ -1504,6 +1543,10 @@ namespace Fyp_Backend.Controllers
                 // hiring flow keeps showing the same type on both sides.
                 // Any JobType the app might send is deliberately overwritten here.
                 model.JobType = ClassifyJobType(bookingClient, bookingWorker);
+
+                model.IsExclusive = model.JobType == "Full-Time" && model.IsExclusive;
+                if (model.IsExclusive && await HasActiveFullTimeJobAsync(bookingWorker.WorkerId))
+                    return Conflict(new { code = "ACTIVE_FULL_TIME_JOB", message = "This worker already has an active full-time job. Proceed without exclusivity or choose another worker." });
 
                 // ─── 5b. PART-TIME ONLY: the client must pick one of the worker's ───
                 //         published time slots, and that slot must still be free
@@ -1590,6 +1633,7 @@ namespace Fyp_Backend.Controllers
                     message = $"{model.JobType} interview request booked successfully!",
                     interviewId = model.InterviewId,
                     jobType = model.JobType,
+                    isExclusive = model.IsExclusive,
                     slotId = model.SlotId,
                     status = model.Status,
                     workerDecision = model.WorkerDecision
@@ -1713,6 +1757,7 @@ namespace Fyp_Backend.Controllers
                         location = h.Address ?? h.Interview.Address,
                         picture = h.Interview.Worker.Picture,
                         jobType = h.Interview.JobType ?? "Full-Time",
+                        isExclusive = h.Interview.IsExclusive && h.Interview.JobType == "Full-Time",
                         slotId = h.Interview.SlotId,
                         slotStartTime = _context.WorkerTimeSlots.Where(s => s.Id == h.Interview.SlotId).Select(s => (TimeSpan?)s.StartTime).FirstOrDefault(),
                         slotEndTime = _context.WorkerTimeSlots.Where(s => s.Id == h.Interview.SlotId).Select(s => (TimeSpan?)s.EndTime).FirstOrDefault(),
@@ -1848,6 +1893,7 @@ namespace Fyp_Backend.Controllers
                         time = i.InterviewDate != null ? i.InterviewDate.Value.ToString("MMM dd, hh:mm tt") : "Not Set",
                         service = "Interview Request",
                         jobType = i.JobType ?? "Full-Time",
+                        isExclusive = i.IsExclusive && i.JobType == "Full-Time",
                         slotId = i.SlotId,
                         slotStartTime = _context.WorkerTimeSlots.Where(s => s.Id == i.SlotId).Select(s => (TimeSpan?)s.StartTime).FirstOrDefault(),
                         slotEndTime = _context.WorkerTimeSlots.Where(s => s.Id == i.SlotId).Select(s => (TimeSpan?)s.EndTime).FirstOrDefault(),
@@ -1893,6 +1939,7 @@ namespace Fyp_Backend.Controllers
                         time = i.InterviewDate != null ? i.InterviewDate.Value.ToString("MMM dd, hh:mm tt") : "Not Set",
                         service = "Interview Request",
                         jobType = i.JobType ?? "Full-Time",
+                        isExclusive = i.IsExclusive && i.JobType == "Full-Time",
                         slotId = i.SlotId,
                         slotStartTime = _context.WorkerTimeSlots.Where(s => s.Id == i.SlotId).Select(s => (TimeSpan?)s.StartTime).FirstOrDefault(),
                         slotEndTime = _context.WorkerTimeSlots.Where(s => s.Id == i.SlotId).Select(s => (TimeSpan?)s.EndTime).FirstOrDefault(),
@@ -1986,6 +2033,7 @@ namespace Fyp_Backend.Controllers
                         hiringDecision = h.HiringDecision ?? "Pending",
                         workerDecision = h.WorkerDecision ?? "Pending",
                         jobType = h.Interview.JobType ?? "Full-Time",
+                        isExclusive = h.Interview.IsExclusive && h.Interview.JobType == "Full-Time",
                         slotId = h.Interview.SlotId,
                         slotStartTime = _context.WorkerTimeSlots.Where(s => s.Id == h.Interview.SlotId).Select(s => (TimeSpan?)s.StartTime).FirstOrDefault(),
                         slotEndTime = _context.WorkerTimeSlots.Where(s => s.Id == h.Interview.SlotId).Select(s => (TimeSpan?)s.EndTime).FirstOrDefault(),
@@ -2108,6 +2156,7 @@ namespace Fyp_Backend.Controllers
                         // them — which is why the Job Offer card kept showing FULL-TIME and no
                         // slot chip while every other screen was correct.
                         jobType = item.jobType,
+                        isExclusive = item.isExclusive,
                         slotId = item.slotId,
                         slotStartTime = item.slotStartTime,
                         slotEndTime = item.slotEndTime,
@@ -2209,6 +2258,7 @@ namespace Fyp_Backend.Controllers
                         WorkerDecision = h.WorkerDecision, // "Pending", "Accepted", "Rejected"
                         HiringDecision = h.HiringDecision, // "Pending", "Accepted" etc.
                         JobType = h.Interview!.JobType ?? "Full-Time",
+                        IsExclusive = h.Interview!.IsExclusive && h.Interview.JobType == "Full-Time",
                         slotId = h.Interview!.SlotId,
                         slotStartTime = _context.WorkerTimeSlots.Where(s => s.Id == h.Interview!.SlotId).Select(s => (TimeSpan?)s.StartTime).FirstOrDefault(),
                         slotEndTime = _context.WorkerTimeSlots.Where(s => s.Id == h.Interview!.SlotId).Select(s => (TimeSpan?)s.EndTime).FirstOrDefault(),
@@ -2227,23 +2277,40 @@ namespace Fyp_Backend.Controllers
 
 
         [HttpPut("ClientConfirmWorkerAcceptance/{id}")]
+        [Authorize(Roles = "Client")]
         public async Task<IActionResult> ClientConfirmWorkerAcceptance(int id)
         {
             try
             {
-                var interview = await _context.Interviews.FindAsync(id);
+                var clientId = ActorId;
+                if (clientId == null) return Unauthorized();
+                var interview = await _context.Interviews.FirstOrDefaultAsync(i => i.InterviewId == id && i.ClientId == clientId);
                 if (interview == null) return NotFound(new { message = "Record not found." });
 
-                var hiring = await _context.Hiring.FirstOrDefaultAsync(h => h.InterviewId == id);
-                if (hiring == null) return NotFound(new { message = "Hiring deployment card context absent." });
+                var hiring = await _context.Hiring.FirstOrDefaultAsync(h => h.InterviewId == id && h.WorkerDecision == "Accepted");
+                if (hiring == null) return NotFound(new { message = "No worker-accepted hiring offer was found." });
+                await using var transaction = await _context.Database.BeginTransactionAsync(System.Data.IsolationLevel.Serializable);
+                if (interview.JobType == "Full-Time" && interview.WorkerId.HasValue)
+                {
+                    // Serialize full-time confirmation by locking the worker row before checking active contracts.
+                    await _context.Workers.FromSqlInterpolated($"SELECT * FROM [dbo].[Worker] WITH (UPDLOCK, ROWLOCK) WHERE [Worker_ID] = {interview.WorkerId.Value}").FirstOrDefaultAsync();
+                    if (await HasActiveFullTimeJobAsync(interview.WorkerId.Value, interview.InterviewId))
+                        return Conflict(new { code = "ACTIVE_FULL_TIME_JOB", message = "Worker has another active full-time job. They must leave it before this full-time job can be confirmed." });
+                }
 
-                // Rule 2d: if user also accepted, fill all fields
+                // Client confirmation is the point at which the exclusivity commitment begins.
                 interview.Status = "Finalized";
                 hiring.HiringDecision = "Accepted";
                 hiring.HiringDate = DateTime.Now;
                 hiring.Address = interview.Address ?? "Confirmed Fleet Address Location";
+                if (interview.JobType == "Full-Time" && interview.IsExclusive && interview.WorkerId.HasValue)
+                {
+                    var worker = await _context.Workers.FindAsync(interview.WorkerId.Value);
+                    if (worker != null) worker.AvailableStatus = false;
+                }
 
                 await _context.SaveChangesAsync();
+                await transaction.CommitAsync();
                 return Ok(new { message = "Worker acceptance confirmed and contract finalized completely!" });
             }
             catch (Exception ex)
@@ -2731,6 +2798,12 @@ namespace Fyp_Backend.Controllers
 
                 // Keep the historic interview flag state as Terminated
                 interview.Status = "Terminated";
+                if (interview.WorkerId.HasValue)
+                {
+                    var worker = await _context.Workers.FindAsync(interview.WorkerId.Value);
+                    if (worker != null)
+                        worker.AvailableStatus = !await HasActiveExclusiveFullTimeJobAsync(worker.WorkerId, interview.InterviewId);
+                }
 
                 // 2. Point Termination toward Hiring instead of Interview mapping 
                 // Note: verify if your entity model property name is precisely 'HiringId'
@@ -2840,12 +2913,16 @@ namespace Fyp_Backend.Controllers
 
 
         [HttpPut("UpdateDutyStatus/{workerId}")]
+        [Authorize(Roles = "Worker")]
         public async Task<IActionResult> UpdateDutyStatus(int workerId, [FromBody] bool isAvailable)
         {
             try
             {
+                if (ActorId != workerId) return Forbid();
                 var worker = await _context.Workers.FindAsync(workerId);
                 if (worker == null) return NotFound(new { message = "Worker not found." });
+                if (isAvailable && await HasActiveExclusiveFullTimeJobAsync(workerId))
+                    return Conflict(new { code = "EXCLUSIVE_JOB_LOCK", message = "Availability is locked while your exclusive full-time job is active. Submit a resignation or wait for termination to unlock it." });
 
                 worker.AvailableStatus = isAvailable;
                 await _context.SaveChangesAsync();
@@ -2858,27 +2935,39 @@ namespace Fyp_Backend.Controllers
             }
         }
         [HttpPost("FinalizeHiringDecision")]
+        [Authorize(Roles = "Client")]
         public async Task<IActionResult> FinalizeHiringDecision([FromBody] HiringUpdateDto model)
         {
             try
             {
-                var hiring = await _context.Hiring.FindAsync(model.HiringId);
-                if (hiring == null)
+                var clientId = ActorId;
+                if (clientId == null) return Unauthorized();
+                var hiring = await _context.Hiring.Include(h => h.Interview)
+                    .FirstOrDefaultAsync(h => h.HiringId == model.HiringId && h.Interview != null && h.Interview.ClientId == clientId);
+                if (hiring == null) return NotFound(new { message = "Hiring context record not found." });
+                if (hiring.WorkerDecision != "Accepted") return Conflict(new { message = "Worker has not accepted this offer." });
+                var interview = hiring.Interview!;
+                await using var transaction = await _context.Database.BeginTransactionAsync(System.Data.IsolationLevel.Serializable);
+                if (interview.JobType == "Full-Time" && interview.WorkerId.HasValue)
                 {
-                    return NotFound(new { message = "Hiring context record trace entry missing." });
+                    await _context.Workers.FromSqlInterpolated($"SELECT * FROM [dbo].[Worker] WITH (UPDLOCK, ROWLOCK) WHERE [Worker_ID] = {interview.WorkerId.Value}").FirstOrDefaultAsync();
+                    if (await HasActiveFullTimeJobAsync(interview.WorkerId.Value, interview.InterviewId))
+                        return Conflict(new { code = "ACTIVE_FULL_TIME_JOB", message = "Worker already has an active full-time job. They must leave it before this full-time offer can be confirmed." });
                 }
 
-                // Apply Rule 5 criteria context update for client finalization only
+                // Client finalization is the point at which exclusive status locks availability.
                 hiring.HiringDecision = "Accepted";
                 hiring.HiringDate = DateTime.Now;
 
-                var interview = await _context.Interviews.FindAsync(hiring.InterviewId);
-                if (interview != null)
+                interview.Status = "Finalized";
+                if (interview.JobType == "Full-Time" && interview.IsExclusive && interview.WorkerId.HasValue)
                 {
-                    interview.Status = "Finalized";
+                    var worker = await _context.Workers.FindAsync(interview.WorkerId.Value);
+                    if (worker != null) worker.AvailableStatus = false;
                 }
 
                 await _context.SaveChangesAsync();
+                await transaction.CommitAsync();
 
                 return Ok(new { status = "Success", message = "Hiring handshake step state successfully mutated." });
             }

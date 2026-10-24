@@ -121,6 +121,7 @@ public partial class Fyp1Context : DbContext
             entity.Property(e => e.JobType).HasMaxLength(20).IsUnicode(false);
             entity.Property(e => e.SlotId).HasColumnName("SlotId");
             entity.Property(e => e.IsResidenceProvided).HasColumnName("IsResidenceProvided");
+            entity.Property(e => e.IsExclusive).HasColumnName("IsExclusive").HasDefaultValue(false);
 
             // Optional link to the picked time slot. SetNull matches the
             // ON DELETE SET NULL foreign key created by Add_SlotId_To_Interview.sql,
