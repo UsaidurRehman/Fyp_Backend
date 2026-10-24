@@ -123,9 +123,8 @@ public partial class Fyp1Context : DbContext
             entity.Property(e => e.IsResidenceProvided).HasColumnName("IsResidenceProvided");
             entity.Property(e => e.IsExclusive).HasColumnName("IsExclusive").HasDefaultValue(false);
 
-            // Optional link to the picked time slot. SetNull matches the
-            // ON DELETE SET NULL foreign key created by Add_SlotId_To_Interview.sql,
-            // so deleting a slot never breaks an existing interview.
+            // Optional link to the picked time slot. Schedule slots are hidden via
+            // IsActive while a Part-Time hire is active rather than deleted.
             entity.HasOne(d => d.Slot)
                 .WithMany()
                 .HasForeignKey(d => d.SlotId)
@@ -381,6 +380,7 @@ public partial class Fyp1Context : DbContext
             entity.Property(e => e.WorkerId).HasColumnName("WorkerId");
             entity.Property(e => e.StartTime).HasColumnType("time");
             entity.Property(e => e.EndTime).HasColumnType("time");
+            entity.Property(e => e.IsActive).HasColumnName("IsActive").HasDefaultValue(true);
 
             entity.HasOne<Worker>()
                 .WithMany()
@@ -395,6 +395,9 @@ public partial class Fyp1Context : DbContext
             entity.HasKey(e => e.HabitId);
 
             entity.Property(e => e.Name).HasMaxLength(60).IsRequired();
+            entity.Property(e => e.IsWorkerSelectable).HasDefaultValue(true);
+            entity.Property(e => e.IsClientFilterable).HasDefaultValue(false);
+            entity.Property(e => e.ExclusiveGroup).HasMaxLength(40);
             entity.HasIndex(e => e.Name).IsUnique();
         });
 

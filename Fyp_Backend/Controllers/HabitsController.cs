@@ -1,15 +1,17 @@
-﻿using Fyp_Backend.Models;
+using Fyp_Backend.Models;
+using Fyp_Backend.Services;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
 
 namespace Fyp_Backend.Controllers
 {
-    // Master habits + the habits a single worker picked.
+    // Worker-selectable habits, client-search filters, and a worker's selections.
     //
-    //  GET  api/Habits/GetHabits                        → the checkbox list / filter options
-    //  GET  api/Habits/GetWorkerHabits/{workerId}       → that worker's current selection
-    //  POST api/Habits/UpdateWorkerHabits               → replace the worker's selection
+    //  GET  api/Habits/GetHabits                        -> worker checklist
+    //  GET  api/Habits/GetClientFilterHabits            -> client filter options
+    //  GET  api/Habits/GetWorkerHabits/{workerId}       -> that worker's selection
+    //  POST api/Habits/UpdateWorkerHabits               -> replace the worker's selection
     [Route("api/[controller]")]
     [ApiController]
     [Authorize]
@@ -22,22 +24,24 @@ namespace Fyp_Backend.Controllers
             _context = context;
         }
 
-        // ── Master list (used by signup, My Habits, the client filter and the profile tab) ──
+        // Worker signup / My Habits list. This intentionally does not return
+        // every master row once the table is configured by audience.
         [HttpGet("GetHabits")]
-        [AllowAnonymous] // the signup screen calls this before the worker has a token
+        [AllowAnonymous] // signup calls this before a worker has a token
         public async Task<IActionResult> GetHabits()
         {
             try
             {
                 var habits = await _context.Habits
-                    .Where(h => h.IsActive)
+                    .Where(h => h.IsActive && h.IsWorkerSelectable)
                     .OrderBy(h => h.SortOrder)
                     .ThenBy(h => h.Name)
                     .Select(h => new
                     {
                         h.HabitId,
                         h.Name,
-                        h.SortOrder
+                        h.SortOrder,
+                        h.ExclusiveGroup
                     })
                     .ToListAsync();
 
@@ -45,11 +49,39 @@ namespace Fyp_Backend.Controllers
             }
             catch (Exception ex)
             {
-                return StatusCode(500, new { message = "Error fetching habits: " + ex.Message });
+                return StatusCode(500, new { message = "Error fetching worker habits: " + ex.Message });
             }
         }
 
-        // ── What one worker selected ──
+        // Only habits explicitly marked as useful search criteria are returned.
+        [HttpGet("GetClientFilterHabits")]
+        [AllowAnonymous]
+        public async Task<IActionResult> GetClientFilterHabits()
+        {
+            try
+            {
+                var habits = await _context.Habits
+                    .Where(h => h.IsActive && h.IsWorkerSelectable && h.IsClientFilterable)
+                    .OrderBy(h => h.SortOrder)
+                    .ThenBy(h => h.Name)
+                    .Select(h => new
+                    {
+                        h.HabitId,
+                        h.Name,
+                        h.SortOrder,
+                        h.ExclusiveGroup
+                    })
+                    .ToListAsync();
+
+                return Ok(habits);
+            }
+            catch (Exception ex)
+            {
+                return StatusCode(500, new { message = "Error fetching client habit filters: " + ex.Message });
+            }
+        }
+
+        // What one worker has selected.
         [HttpGet("GetWorkerHabits/{workerId}")]
         public async Task<IActionResult> GetWorkerHabits(int workerId)
         {
@@ -82,8 +114,8 @@ namespace Fyp_Backend.Controllers
             }
         }
 
-        // ── Replace the worker's selection (signup sends its picks through
-        //    AccountCreation/SignupWorker instead; this is for My Habits / Edit Profile) ──
+        // Replace the worker's selection. Signup and profile-edit use their
+        // respective account endpoints; this endpoint is used by My Habits.
         [HttpPost("UpdateWorkerHabits")]
         public async Task<IActionResult> UpdateWorkerHabits([FromBody] WorkerHabitsDto model)
         {
@@ -101,12 +133,20 @@ namespace Fyp_Backend.Controllers
                     .Distinct()
                     .ToList();
 
-                // Only ids that really exist in the master list are accepted.
-                var validIds = await _context.Habits
+                var requestedHabits = await _context.Habits
                     .Where(h => wanted.Contains(h.HabitId))
-                    .Select(h => h.HabitId)
                     .ToListAsync();
+                var selectableHabits = requestedHabits
+                    .Where(h => h.IsActive && h.IsWorkerSelectable)
+                    .ToList();
 
+                if (selectableHabits.Count != wanted.Count)
+                    return BadRequest(new { message = "One of the selected habits is inactive or is not available for worker profiles." });
+
+                if (HabitSelectionRules.FindExclusiveGroupConflict(selectableHabits) != null)
+                    return BadRequest(new { message = "Choose only one option from each opposite habit pair." });
+
+                var validIds = selectableHabits.Select(h => h.HabitId).ToList();
                 var existing = await _context.WorkerHabits
                     .Where(wh => wh.WorkerId == model.WorkerId)
                     .ToListAsync();

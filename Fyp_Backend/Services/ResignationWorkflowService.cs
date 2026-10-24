@@ -35,6 +35,27 @@ public sealed class ResignationWorkflowService(Fyp1Context db, TimeProvider cloc
         return new WorkflowUnit(null, TestStoreGate);
     }
 
+    /// <summary>
+    /// Hide or restore a recurring Part-Time slot without deleting it. The worker
+    /// and client availability endpoints both filter on this flag.
+    /// </summary>
+    public async Task SetPartTimeSlotActiveAsync(Interview interview, bool isActive, CancellationToken ct = default)
+    {
+        if (!string.Equals(interview.JobType, "Part-Time", StringComparison.OrdinalIgnoreCase) ||
+            !interview.SlotId.HasValue || !interview.WorkerId.HasValue)
+        {
+            return;
+        }
+
+        var slotId = interview.SlotId.Value;
+        var workerId = interview.WorkerId.Value;
+        var slot = db.Database.IsSqlServer()
+            ? await db.WorkerTimeSlots.FromSqlInterpolated($"SELECT * FROM [dbo].[WorkerTimeSlots] WITH (UPDLOCK, ROWLOCK) WHERE [Id] = {slotId} AND [WorkerId] = {workerId}").FirstOrDefaultAsync(ct)
+            : await db.WorkerTimeSlots.FirstOrDefaultAsync(s => s.Id == slotId && s.WorkerId == workerId, ct);
+
+        if (slot != null) slot.IsActive = isActive;
+    }
+
     // All writers lock the interview first, then its resignation. Consistent
     // ordering serializes submission, expiry, manual acceptance and reviews.
     public Task<Interview?> LockInterviewAsync(int interviewId, CancellationToken ct = default)
@@ -83,6 +104,9 @@ public sealed class ResignationWorkflowService(Fyp1Context db, TimeProvider cloc
         };
         db.Resignations.Add(notice);
         interview.Status = "ResignationPending";
+        // The worker requested immediate reactivation on resignation submission,
+        // even though the contract remains in its notice period.
+        await SetPartTimeSlotActiveAsync(interview, true, ct);
         // Persist the resignation first. For an exclusive full-time contract,
         // resignation submission releases its availability lock immediately.
         await db.SaveChangesAsync(ct);
@@ -137,6 +161,9 @@ public sealed class ResignationWorkflowService(Fyp1Context db, TimeProvider cloc
             ApplyAcceptance(notice, interview, automatic ? notice.NoticeEndsAtUtc!.Value : now,
                 automatic ? "Automatic" : "Client");
         }
+        // Keep the slot active when the resignation takes effect as well, in
+        // case another Part-Time finalization hid it during the notice period.
+        await SetPartTimeSlotActiveAsync(interview, true, ct);
         await EnsureAcceptanceNoticeAsync(notice, interview, ct);
         await db.SaveChangesAsync(ct);
         await unit.CommitAsync(ct);
@@ -167,6 +194,7 @@ public sealed class ResignationWorkflowService(Fyp1Context db, TimeProvider cloc
                 notice.AcceptedAtUtc != null || notice.NoticeEndsAtUtc > UtcNow ||
                 !IsStatus(interview.Status, "ResignationPending")) continue;
             ApplyAcceptance(notice, interview, notice.NoticeEndsAtUtc.Value, "Automatic");
+            await SetPartTimeSlotActiveAsync(interview, true, ct);
             await EnsureAcceptanceNoticeAsync(notice, interview, ct);
             await db.SaveChangesAsync(ct);
             await unit.CommitAsync(ct);

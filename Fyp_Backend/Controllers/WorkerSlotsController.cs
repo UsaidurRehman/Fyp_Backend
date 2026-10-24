@@ -24,7 +24,7 @@ namespace Fyp_Backend.Controllers
             try
             {
                 var slots = await _context.WorkerTimeSlots
-                    .Where(s => s.WorkerId == workerId)
+                    .Where(s => s.WorkerId == workerId && s.IsActive)
                     .Select(s => new
                     {
                         s.Id,
@@ -60,7 +60,7 @@ namespace Fyp_Backend.Controllers
                 }
 
                 // Check for overlapping slots
-                bool isOverlapping = await _context.WorkerTimeSlots.AnyAsync(s => 
+                bool isOverlapping = await _context.WorkerTimeSlots.AnyAsync(s =>
                     s.WorkerId == slot.WorkerId &&
                     (
                         (slot.StartTime >= s.StartTime && slot.StartTime < s.EndTime) ||
@@ -74,6 +74,9 @@ namespace Fyp_Backend.Controllers
                     return BadRequest(new { message = "The selected time slot overlaps with an existing schedule." });
                 }
 
+                // New/republished slots are always visible; clients cannot create
+                // an intentionally hidden slot through this endpoint.
+                slot.IsActive = true;
                 _context.WorkerTimeSlots.Add(slot);
                 await _context.SaveChangesAsync();
 

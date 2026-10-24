@@ -275,10 +275,13 @@ namespace Fyp_Backend.Controllers
                     query = query.Where(w => w.Gender == gender);
                 }
 
-                // Filter by city if provided
-                if (!string.IsNullOrEmpty(city))
+                // Filter by city if provided. "All" intentionally means no
+                // location restriction, so clients can search across countries.
+                var normalizedCity = city?.Trim();
+                if (!string.IsNullOrWhiteSpace(normalizedCity) &&
+                    !string.Equals(normalizedCity, "All", StringComparison.OrdinalIgnoreCase))
                 {
-                    query = query.Where(w => w.Address != null && w.Address.Contains(city));
+                    query = query.Where(w => w.Address != null && w.Address.Contains(normalizedCity));
                 }
 
                 // Filter by name if search is provided
@@ -297,13 +300,28 @@ namespace Fyp_Backend.Controllers
                     }
                 }
 
-                // Habits filter — AND logic like sub-skills: a worker must hold
-                // every habit the client ticked.
-                if (habitIds != null && habitIds.Any())
+                // Client requests may only apply habits configured as active search
+                // filters. Ignore worker-profile-only IDs so an older client cannot
+                // bypass the audience split by calling this endpoint directly.
+                var requestedHabitIds = (habitIds ?? new List<int>())
+                    .Where(id => id > 0)
+                    .Distinct()
+                    .ToList();
+                if (requestedHabitIds.Count > 0)
                 {
-                    foreach (var habitId in habitIds.Where(id => id > 0).Distinct())
+                    var filterableHabits = await _context.Habits
+                        .Where(h => requestedHabitIds.Contains(h.HabitId)
+                            && h.IsActive && h.IsWorkerSelectable && h.IsClientFilterable)
+                        .ToListAsync();
+
+                    if (HabitSelectionRules.FindExclusiveGroupConflict(filterableHabits) != null)
+                        return BadRequest(new { message = "Choose only one option from each opposite habit pair." });
+
+                    // AND logic across distinct preferences: a worker must hold
+                    // every accepted client filter the client selected.
+                    foreach (var habit in filterableHabits)
                     {
-                        int wantedHabitId = habitId;
+                        int wantedHabitId = habit.HabitId;
                         query = query.Where(w => _context.WorkerHabits
                             .Any(wh => wh.WorkerId == w.WorkerId && wh.HabitId == wantedHabitId));
                     }
@@ -459,7 +477,7 @@ namespace Fyp_Backend.Controllers
                 if (isWithinRadius)
                 {
                     var rawTimeSlots = await _context.WorkerTimeSlots
-                        .Where(ts => ts.WorkerId == worker.WorkerId)
+                        .Where(ts => ts.WorkerId == worker.WorkerId && ts.IsActive)
                         .ToListAsync();
 
                     timeSlots = rawTimeSlots.Select(ts => new
@@ -650,8 +668,8 @@ namespace Fyp_Backend.Controllers
         }
         // ═══════════════════════════════════════════════════════════════════════════
         //  GetWorkerAvailableSlots/{workerId}?date=yyyy-MM-dd
-        //  Used by InterviewSelectionScreen (part-time bookings) to show the
-        //  worker's time slots for the chosen day, marking the ones already taken.
+        //  Used by InterviewSelectionScreen (part-time bookings) to show active
+        //  worker slots and mark a slot taken if any active interview has reserved it.
         //  Also returns the authoritative Part-Time / Full-Time verdict for this
         //  client+worker pair, so the app never has to guess.
         // ═══════════════════════════════════════════════════════════════════════════
@@ -698,37 +716,42 @@ namespace Fyp_Backend.Controllers
                     day = parsed.Date;
                 }
 
-                var dayStart = day;
-                var dayEnd = day.AddDays(1);
-
                 // --- the worker's recurring daily slots ---
                 var rawSlots = await _context.WorkerTimeSlots
-                    .Where(s => s.WorkerId == workerId)
+                    .Where(s => s.WorkerId == workerId && s.IsActive)
                     .OrderBy(s => s.StartTime)
                     .ToListAsync();
 
-                // --- slots already reserved on that day ---
-                // A slot is consumed for a given (worker + date). Other dates of the
-                // same slot stay open. Dead statuses do not block anything.
+                // --- globally reserved slots ---
+                // Any active interview reserves its worker+slot regardless of the
+                // selected date. A submitted resignation releases that reservation.
+                // Finalized Part-Time hires hide the row via IsActive until resignation
+                // is submitted or the contract is terminated.
                 var bookedSlotIds = await _context.Interviews
                     .Where(i => i.WorkerId == workerId &&
                                 i.SlotId != null &&
-                                i.InterviewDate != null &&
-                                i.InterviewDate >= dayStart && i.InterviewDate < dayEnd &&
                                 i.Status != "Rejected" &&
                                 i.Status != "JobRejected" &&
                                 i.Status != "Terminated" &&
                                 i.Status != "Resigned" &&
+                                i.Status != "ResignationPending" &&
                                 i.Status != "Completed")
                     .Select(i => i.SlotId!.Value)
                     .ToListAsync();
+
+                // Treat duplicate schedule rows with the same time window as the
+                // same user-facing slot, so a duplicate ID cannot bypass the lock.
+                var bookedSlotTimeKeys = rawSlots
+                    .Where(s => bookedSlotIds.Contains(s.Id))
+                    .Select(s => (s.StartTime, s.EndTime))
+                    .ToHashSet();
 
                 var slots = rawSlots.Select(s => new
                 {
                     id = s.Id,
                     startTime = s.StartTime.ToString(@"hh\:mm"),
                     endTime = s.EndTime.ToString(@"hh\:mm"),
-                    isTaken = bookedSlotIds.Contains(s.Id)
+                    isTaken = bookedSlotIds.Contains(s.Id) || bookedSlotTimeKeys.Contains((s.StartTime, s.EndTime))
                 });
 
                 return Ok(new
@@ -1548,9 +1571,13 @@ namespace Fyp_Backend.Controllers
                 if (model.IsExclusive && await HasActiveFullTimeJobAsync(bookingWorker.WorkerId))
                     return Conflict(new { code = "ACTIVE_FULL_TIME_JOB", message = "This worker already has an active full-time job. Proceed without exclusivity or choose another worker." });
 
+                // Slot IDs are the normal identity, but same-time duplicate rows
+                // should behave as one slot across every interview date.
+                var matchingSlotIds = new List<int>();
+
                 // ─── 5b. PART-TIME ONLY: the client must pick one of the worker's ───
-                //         published time slots, and that slot must still be free
-                //         for the chosen day. Full-time bookings never reach this
+                //         published time slots, and that slot must not be reserved
+                //         by any active interview on any date. Full-time bookings never reach this
                 //         block and keep SlotId = NULL (behaviour unchanged).
                 if (model.JobType == "Part-Time")
                 {
@@ -1562,25 +1589,30 @@ namespace Fyp_Backend.Controllers
                         return BadRequest(new { message = "Please select one of the worker's time slots." });
 
                     var chosenSlot = await _context.WorkerTimeSlots.FindAsync(model.SlotId.Value);
-                    if (chosenSlot == null || chosenSlot.WorkerId != bookingWorker.WorkerId)
+                    if (chosenSlot == null || !chosenSlot.IsActive)
+                        return Conflict(new { message = "That time slot is no longer available. Please refresh and choose another one." });
+                    if (chosenSlot.WorkerId != bookingWorker.WorkerId)
                         return BadRequest(new { message = "That time slot does not belong to this worker." });
 
-                    var dayStart = model.InterviewDate.Value.Date;
-                    var dayEnd = dayStart.AddDays(1);
+                    matchingSlotIds = await _context.WorkerTimeSlots
+                        .Where(s => s.WorkerId == bookingWorker.WorkerId &&
+                                    s.StartTime == chosenSlot.StartTime &&
+                                    s.EndTime == chosenSlot.EndTime)
+                        .Select(s => s.Id)
+                        .ToListAsync();
 
                     bool slotTaken = await _context.Interviews.AnyAsync(i =>
                         i.WorkerId == bookingWorker.WorkerId &&
-                        i.SlotId == model.SlotId &&
-                        i.InterviewDate != null &&
-                        i.InterviewDate >= dayStart && i.InterviewDate < dayEnd &&
+                        i.SlotId.HasValue && matchingSlotIds.Contains(i.SlotId.Value) &&
                         i.Status != "Rejected" &&
                         i.Status != "JobRejected" &&
                         i.Status != "Terminated" &&
                         i.Status != "Resigned" &&
+                        i.Status != "ResignationPending" &&
                         i.Status != "Completed");
 
                     if (slotTaken)
-                        return BadRequest(new { message = "That time slot is already booked for this date. Please pick another one." });
+                        return Conflict(new { message = "That time slot is already booked for another interview, even on a different date. Please pick another slot." });
                 }
                 else
                 {
@@ -1601,29 +1633,25 @@ namespace Fyp_Backend.Controllers
                 // the check above, both insert. The row inserted LAST is rolled back, so
                 // exactly one booking wins the slot and the other client gets the same
                 // "already booked" message. Only affects part-time rows with a slot.
-                if (model.JobType == "Part-Time" && model.SlotId != null && model.InterviewDate != null)
+                if (model.JobType == "Part-Time" && model.SlotId != null)
                 {
-                    var dayFrom = model.InterviewDate.Value.Date;
-                    var dayTo = dayFrom.AddDays(1);
-
                     bool lostTheRace = await _context.Interviews.AnyAsync(i =>
                         i.InterviewId != model.InterviewId &&
                         i.InterviewId < model.InterviewId &&
                         i.WorkerId == model.WorkerId &&
-                        i.SlotId == model.SlotId &&
-                        i.InterviewDate != null &&
-                        i.InterviewDate >= dayFrom && i.InterviewDate < dayTo &&
+                        i.SlotId.HasValue && matchingSlotIds.Contains(i.SlotId.Value) &&
                         i.Status != "Rejected" &&
                         i.Status != "JobRejected" &&
                         i.Status != "Terminated" &&
                         i.Status != "Resigned" &&
+                        i.Status != "ResignationPending" &&
                         i.Status != "Completed");
 
                     if (lostTheRace)
                     {
                         _context.Interviews.Remove(model);
                         await _context.SaveChangesAsync();
-                        return BadRequest(new { message = "That time slot was just booked by another client. Please pick another one." });
+                        return Conflict(new { message = "That time slot was just booked by another client, even on a different date. Please pick another slot." });
                     }
                 }
 
@@ -2278,7 +2306,8 @@ namespace Fyp_Backend.Controllers
 
         [HttpPut("ClientConfirmWorkerAcceptance/{id}")]
         [Authorize(Roles = "Client")]
-        public async Task<IActionResult> ClientConfirmWorkerAcceptance(int id)
+        public async Task<IActionResult> ClientConfirmWorkerAcceptance(int id,
+            [FromServices] ResignationWorkflowService workflow)
         {
             try
             {
@@ -2308,6 +2337,8 @@ namespace Fyp_Backend.Controllers
                     var worker = await _context.Workers.FindAsync(interview.WorkerId.Value);
                     if (worker != null) worker.AvailableStatus = false;
                 }
+
+                await workflow.SetPartTimeSlotActiveAsync(interview, false);
 
                 await _context.SaveChangesAsync();
                 await transaction.CommitAsync();
@@ -2796,8 +2827,10 @@ namespace Fyp_Backend.Controllers
                 };
                 _context.Reviews.Add(review);
 
-                // Keep the historic interview flag state as Terminated
+                // Keep the historic interview flag state as Terminated and restore
+                // its Part-Time slot in the same transaction.
                 interview.Status = "Terminated";
+                await workflow.SetPartTimeSlotActiveAsync(interview, true, ct);
                 if (interview.WorkerId.HasValue)
                 {
                     var worker = await _context.Workers.FindAsync(interview.WorkerId.Value);
@@ -2936,7 +2969,8 @@ namespace Fyp_Backend.Controllers
         }
         [HttpPost("FinalizeHiringDecision")]
         [Authorize(Roles = "Client")]
-        public async Task<IActionResult> FinalizeHiringDecision([FromBody] HiringUpdateDto model)
+        public async Task<IActionResult> FinalizeHiringDecision([FromBody] HiringUpdateDto model,
+            [FromServices] ResignationWorkflowService workflow)
         {
             try
             {
@@ -2965,6 +2999,8 @@ namespace Fyp_Backend.Controllers
                     var worker = await _context.Workers.FindAsync(interview.WorkerId.Value);
                     if (worker != null) worker.AvailableStatus = false;
                 }
+
+                await workflow.SetPartTimeSlotActiveAsync(interview, false);
 
                 await _context.SaveChangesAsync();
                 await transaction.CommitAsync();
@@ -3282,7 +3318,7 @@ namespace Fyp_Backend.Controllers
             try
             {
                 var slots = await _context.WorkerTimeSlots
-                    .Where(s => s.WorkerId == workerId)
+                    .Where(s => s.WorkerId == workerId && s.IsActive)
                     .Select(s => new
                     {
                         s.Id,
@@ -3312,7 +3348,18 @@ namespace Fyp_Backend.Controllers
                 {
                     return BadRequest(new { message = "Invalid time slot data." });
                 }
+                if (slot.StartTime >= slot.EndTime)
+                    return BadRequest(new { message = "Start time must be before end time." });
 
+                bool isOverlapping = await _context.WorkerTimeSlots.AnyAsync(s =>
+                    s.WorkerId == slot.WorkerId &&
+                    ((slot.StartTime >= s.StartTime && slot.StartTime < s.EndTime) ||
+                     (slot.EndTime > s.StartTime && slot.EndTime <= s.EndTime) ||
+                     (slot.StartTime <= s.StartTime && slot.EndTime >= s.EndTime)));
+                if (isOverlapping)
+                    return BadRequest(new { message = "The selected time slot overlaps with an existing schedule." });
+
+                slot.IsActive = true;
                 _context.WorkerTimeSlots.Add(slot);
                 await _context.SaveChangesAsync();
 

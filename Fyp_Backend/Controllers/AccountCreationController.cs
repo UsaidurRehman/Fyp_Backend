@@ -1,5 +1,6 @@
 using BCrypt.Net;
 using Fyp_Backend.Models;
+using Fyp_Backend.Services;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
 using Newtonsoft.Json;
@@ -111,13 +112,20 @@ namespace Fyp_Backend.Controllers
                 if (habitIds.Count == 0)
                     return BadRequest(new { message = "Please select at least one habit before creating the account." });
 
-                var validHabitIds = await _context.Habits
+                var requestedHabits = await _context.Habits
                     .Where(h => habitIds.Contains(h.HabitId))
-                    .Select(h => h.HabitId)
                     .ToListAsync();
+                var selectableHabits = requestedHabits
+                    .Where(h => h.IsActive && h.IsWorkerSelectable)
+                    .ToList();
 
-                if (validHabitIds.Count != habitIds.Count)
-                    return BadRequest(new { message = "One of the selected habits no longer exists." });
+                if (selectableHabits.Count != habitIds.Count)
+                    return BadRequest(new { message = "One of the selected habits is inactive or is not available for worker profiles." });
+
+                if (HabitSelectionRules.FindExclusiveGroupConflict(selectableHabits) != null)
+                    return BadRequest(new { message = "Choose only one option from each opposite habit pair." });
+
+                var validHabitIds = selectableHabits.Select(h => h.HabitId).ToList();
 
                 string imagePath = await SaveImage(model.PictureFile, model.Cnic);
                 if (imagePath == "Invalid") return BadRequest(new { message = "Invalid image." });
@@ -281,7 +289,7 @@ namespace Fyp_Backend.Controllers
 
                 // Habits: the field is only present when the app sends it, so an
                 // omitted habitsJson leaves the worker's habits untouched while an
-                // explicit [] clears them. Unknown ids are ignored.
+                // explicit [] clears them. Inactive/non-selectable IDs are rejected.
                 if (habitsJson != null && model.WorkerId > 0)
                 {
                     List<int> habitIds;
@@ -295,11 +303,20 @@ namespace Fyp_Backend.Controllers
                     }
 
                     var wantedIds = habitIds.Where(id => id > 0).Distinct().ToList();
-                    var validIds = await _context.Habits
+                    var requestedHabits = await _context.Habits
                         .Where(h => wantedIds.Contains(h.HabitId))
-                        .Select(h => h.HabitId)
                         .ToListAsync();
+                    var selectableHabits = requestedHabits
+                        .Where(h => h.IsActive && h.IsWorkerSelectable)
+                        .ToList();
 
+                    if (selectableHabits.Count != wantedIds.Count)
+                        return BadRequest(new { message = "One of the selected habits is inactive or is not available for worker profiles." });
+
+                    if (HabitSelectionRules.FindExclusiveGroupConflict(selectableHabits) != null)
+                        return BadRequest(new { message = "Choose only one option from each opposite habit pair." });
+
+                    var validIds = selectableHabits.Select(h => h.HabitId).ToList();
                     var oldHabits = await _context.WorkerHabits
                         .Where(wh => wh.WorkerId == model.WorkerId)
                         .ToListAsync();
