@@ -506,6 +506,83 @@ namespace Fyp_Backend.Controllers
                 return StatusCode(500, new { message = "Error: " + (ex.InnerException?.Message ?? ex.Message) });
             }
         }
+        [HttpGet("GetWorkerCertificates/{workerId}")]
+        public async Task<IActionResult> GetWorkerCertificates([FromRoute] int workerId)
+        {
+            if (workerId <= 0)
+                return BadRequest(new { message = "Invalid worker ID." });
+
+            try
+            {
+                // Keep both certificate sources and include every issued course certificate.
+                var companyCertificates = await _context.WorkerCertifications
+                    .AsNoTracking()
+                    .Where(c => c.WorkerID == workerId)
+                    .Select(c => new WorkerCertificateRecordDto
+                    {
+                        CertificateId = c.CertificationID,
+                        CertificateType = "CompanyCertification",
+                        CertificateTitle = c.CertificateTitle,
+                        EvaluationNotes = c.TrainingEvaluationNotes,
+                        IssuedDate = c.IssuedDate,
+                        WorkerName = c.Worker.Name,
+                        WorkerPicture = c.Worker.Picture,
+                        CompanyName = c.Company.CompanyName
+                    })
+                    .ToListAsync();
+
+                var courseCertificates = await _context.CourseCertificates
+                    .AsNoTracking()
+                    .Where(c => c.WorkerID == workerId)
+                    .Select(c => new WorkerCertificateRecordDto
+                    {
+                        CertificateId = c.CertificateID,
+                        CertificateType = "CourseCompletion",
+                        CertificateTitle = c.Course.CourseName,
+                        CourseDescription = c.Course.Description,
+                        Syllabus = c.Course.Syllabus,
+                        IssuedDate = c.IssuedDateUtc,
+                        WorkerName = c.Worker.Name,
+                        WorkerPicture = c.Worker.Picture,
+                        CompanyName = c.Company.CompanyName,
+                        CourseStartDate = c.Course.StartDate,
+                        CourseEndDate = c.Course.EndDate,
+                        CompletionDateUtc = c.Enrollment.CompletionDateUtc,
+                        CertificateCode = c.CertificateCode,
+                    })
+                    .ToListAsync();
+
+                var certificates = companyCertificates
+                    .Concat(courseCertificates)
+                    .OrderByDescending(c => c.IssuedDate)
+                    .Select(c => new
+                    {
+                        certificateId = c.CertificateId,
+                        certificateType = c.CertificateType,
+                        certificateTitle = c.CertificateTitle,
+                        evaluationNotes = c.EvaluationNotes,
+                        courseDescription = c.CourseDescription,
+                        syllabus = c.Syllabus,
+                        issuedDate = c.IssuedDate.ToString("yyyy-MM-dd"),
+                        workerName = c.WorkerName,
+                        workerPicture = c.WorkerPicture,
+                        companyName = c.CompanyName,
+                        courseStartDate = c.CourseStartDate?.ToString("yyyy-MM-dd"),
+                        courseEndDate = c.CourseEndDate?.ToString("yyyy-MM-dd"),
+                        completionDateUtc = c.CompletionDateUtc?.ToString("yyyy-MM-dd"),
+                        certificateCode = c.CertificateCode,
+                        certificateUrl = c.CertificateUrl
+                    })
+                    .ToList();
+
+                return Ok(certificates);
+            }
+            catch (Exception ex)
+            {
+                return StatusCode(500, new { message = "Error: " + (ex.InnerException?.Message ?? ex.Message) });
+            }
+        }
+
         [HttpGet("GetWorkerCertificateDetail/{workerId}")]
         public async Task<IActionResult> GetWorkerCertificateDetail([FromRoute] int workerId)
         {
@@ -525,28 +602,28 @@ namespace Fyp_Backend.Controllers
                         issuedDate = wc.IssuedDate.ToString("dd-MM-yyyy"),
                         workerName = _context.Workers.Where(w => w.WorkerId == wc.WorkerID).Select(w => w.Name).FirstOrDefault() ?? "N/A",
                         workerPicture = _context.Workers.Where(w => w.WorkerId == wc.WorkerID).Select(w => w.Picture).FirstOrDefault(),
-                        companyName = _context.Companies.Where(c => c.CompanyID == wc.CompanyID).Select(c => c.CompanyName).FirstOrDefault() ?? "Proton Services Ltd."
+                        companyName = _context.Companies.Where(c => c.CompanyID == wc.CompanyID).Select(c => c.CompanyName).FirstOrDefault()
                     })
                     .FirstOrDefaultAsync();
 
-                // If the worker has no legacy company verification, expose their
-                // newest course-completion certificate through the same response
-                // contract so the existing mobile certificate screen can render it.
+                // Backward-compatible single-record endpoint. The client certificate
+                // flow uses GetWorkerCertificates above to display every record.
                 if (certificate == null)
                 {
                     var courseCertificate = await _context.CourseCertificates
-                        .Where(c => c.WorkerID == workerId && !c.IsRevoked)
+                        .Where(c => c.WorkerID == workerId)
                         .OrderByDescending(c => c.IssuedDateUtc)
                         .Select(c => new
                         {
                             certificateId = c.CertificateID,
                             certificateTitle = c.Course.CourseName,
-                            evaluationNotes = "Successfully completed the full company training course and satisfied its completion requirements.",
+                            evaluationNotes = (string?)null,
+                            courseDescription = c.Course.Description,
                             issuedDate = c.IssuedDateUtc.ToString("dd-MM-yyyy"),
                             workerName = c.Worker.Name ?? "N/A",
                             workerPicture = c.Worker.Picture,
                             companyName = c.Company.CompanyName,
-                            certificateCode = c.CertificateCode
+                            certificateCode = c.CertificateCode,
                         })
                         .FirstOrDefaultAsync();
 
@@ -565,6 +642,7 @@ namespace Fyp_Backend.Controllers
                         courseCertificate.certificateId,
                         courseCertificate.certificateTitle,
                         courseCertificate.evaluationNotes,
+                        courseCertificate.courseDescription,
                         courseCertificate.issuedDate,
                         courseCertificate.workerName,
                         workerPicture = courseCleanPicPath,
@@ -596,6 +674,27 @@ namespace Fyp_Backend.Controllers
             {
                 return StatusCode(500, new { message = "Error: " + (ex.InnerException?.Message ?? ex.Message) });
             }
+        }
+
+        private sealed class WorkerCertificateRecordDto
+        {
+            public WorkerCertificateRecordDto() { }
+
+            public int CertificateId { get; set; }
+            public string CertificateType { get; set; } = string.Empty;
+            public string? CertificateTitle { get; set; }
+            public string? EvaluationNotes { get; set; }
+            public string? CourseDescription { get; set; }
+            public string? Syllabus { get; set; }
+            public DateTime IssuedDate { get; set; }
+            public string? WorkerName { get; set; }
+            public string? WorkerPicture { get; set; }
+            public string? CompanyName { get; set; }
+            public DateOnly? CourseStartDate { get; set; }
+            public DateOnly? CourseEndDate { get; set; }
+            public DateTime? CompletionDateUtc { get; set; }
+            public string? CertificateCode { get; set; }
+            public string? CertificateUrl { get; set; }
         }
     }
 

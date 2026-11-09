@@ -70,6 +70,16 @@ namespace Fyp_Backend.Controllers
                         // Enforces exact lowercase string attributes demanded by renderWorkerCard destructuring
                         id = h.Interview!.WorkerId.ToString(),
                         name = h.Interview.Worker!.Name,
+                        selectedSkills = _context.InterviewSkills
+                            .Where(selected => selected.InterviewId == h.InterviewId)
+                            .Join(_context.Skills,
+                                selected => selected.SkillsId,
+                                skill => skill.SkillsId,
+                                (selected, skill) => new { skill.SkillsId, skill.SkillName })
+                            .OrderBy(skill => skill.SkillName)
+                            .ThenBy(skill => skill.SkillsId)
+                            .Select(skill => skill.SkillName ?? "Skill")
+                            .ToList(),
                         role = _context.Experiences
                             .Where(e => e.WorkerId == h.Interview.WorkerId)
                             .Select(e => e.WorkAt)
@@ -333,12 +343,11 @@ namespace Fyp_Backend.Controllers
 
                 // Company certification flag for the "Certified" badge on the worker
                 // cards. One set-based query up front (legacy company certifications
-                // UNION non-revoked course certificates) instead of two more queries
+                // UNION course certificates) instead of two more queries
                 // inside the per-worker loop below.
                 var certifiedWorkerIds = (await _context.WorkerCertifications
                         .Select(wc => wc.WorkerID)
                         .Union(_context.CourseCertificates
-                            .Where(cc => !cc.IsRevoked)
                             .Select(cc => cc.WorkerID))
                         .ToListAsync())
                     .ToHashSet();
@@ -406,6 +415,10 @@ namespace Fyp_Backend.Controllers
                         .ThenInclude(i => i.Reviews)
                             .ThenInclude(r => r.ReviewCriteriaRatings)
                                 .ThenInclude(rc => rc.Criteria)
+                    .Include(w => w.Interviews)
+                        .ThenInclude(i => i.Reviews)
+                            .ThenInclude(r => r.ReviewSkillRatings)
+                                .ThenInclude(sr => sr.Skill)
                     .Include(w => w.Interviews)
                         .ThenInclude(i => i.Client)
                     .FirstOrDefaultAsync(w => w.WorkerId == id);
@@ -507,6 +520,10 @@ namespace Fyp_Backend.Controllers
                                 .OrderBy(x => x.Criteria.SortOrder)
                                 .ThenBy(x => x.CriteriaId)
                                 .Select(x => new { name = x.Criteria.CriteriaName, score = x.Score })
+                                .ToList(),
+                            skillRatings = r.ReviewSkillRatings
+                                .OrderBy(x => x.SkillsId)
+                                .Select(x => new { skillsId = x.SkillsId, name = x.Skill.SkillName ?? "Skill", score = x.Score })
                                 .ToList()
                         }))
                     .ToList();
@@ -529,6 +546,7 @@ namespace Fyp_Backend.Controllers
                         r.rating,
                         r.comment,
                         r.criteria,
+                        r.skillRatings,
                         r.date,
                         workedFrom = window.From?.ToString("yyyy-MM-dd"),
                         workedTo = window.To?.ToString("yyyy-MM-dd"),
@@ -563,17 +581,18 @@ namespace Fyp_Backend.Controllers
                     .GroupBy(s => s.SkillsId)
                     .ToDictionary(g => g.Key, g => g.First().SkillName);
 
-                var primarySkills = new List<string>();
+                var primarySkills = new List<string>(); // legacy string list retained for compatibility
+                var primarySkillIds = new List<int>();
                 var partTimeSkills = new List<object>();
+                var partTimeSkillIdsByCategory = new Dictionary<int, List<int>>();
                 string? primaryCategoryName = null;
                 int? primaryCategoryId = null;
-
-                var partTimeGroups = new Dictionary<string, List<string>>();
 
                 foreach (var item in junctionData)
                 {
                     if (primaryCategoryId == null)
                     {
+                        // Keep the current primary-category rule used by worker.role.
                         primaryCategoryId = item.CategoryId;
                         categoryLookup.TryGetValue(item.CategoryId, out primaryCategoryName);
                     }
@@ -584,23 +603,80 @@ namespace Fyp_Backend.Controllers
                         {
                             if (!primarySkills.Contains(skillName)) primarySkills.Add(skillName);
                         }
+                        if (!primarySkillIds.Contains(item.SkillsId)) primarySkillIds.Add(item.SkillsId);
                     }
-                    else
+                    else if (categoryLookup.ContainsKey(item.CategoryId))
                     {
-                        if (categoryLookup.TryGetValue(item.CategoryId, out var catName))
+                        if (!partTimeSkillIdsByCategory.TryGetValue(item.CategoryId, out var skillIds))
                         {
-                            if (!partTimeGroups.ContainsKey(catName)) partTimeGroups[catName] = new List<string>();
-                            if (skillLookup.TryGetValue(item.SkillsId, out var sName))
-                            {
-                                if (!partTimeGroups[catName].Contains(sName)) partTimeGroups[catName].Add(sName);
-                            }
+                            skillIds = new List<int>();
+                            partTimeSkillIdsByCategory[item.CategoryId] = skillIds;
                         }
+                        if (!skillIds.Contains(item.SkillsId)) skillIds.Add(item.SkillsId);
                     }
                 }
 
-                foreach (var kvp in partTimeGroups)
+                // Aggregate only client-to-worker closing skill ratings. Each saved
+                // score row contributes once to its skill and category average.
+                var clientSkillScores = worker.Interviews
+                    .SelectMany(i => i.Reviews.Where(r => r.ReviewerRole == "Client"))
+                    .SelectMany(r => r.ReviewSkillRatings)
+                    .GroupBy(x => x.SkillsId)
+                    .ToDictionary(g => g.Key, g => g.Select(x => x.Score).ToList());
+
+                List<object> BuildSkillRatingRows(IEnumerable<int> skillIds)
                 {
-                    partTimeSkills.Add(new { categoryName = kvp.Key, skills = kvp.Value });
+                    var rows = new List<object>();
+                    foreach (var skillId in skillIds.Distinct()
+                                 .OrderBy(id => skillLookup.TryGetValue(id, out var name) ? name : "")
+                                 .ThenBy(id => id))
+                    {
+                        skillLookup.TryGetValue(skillId, out var name);
+                        var scores = clientSkillScores.TryGetValue(skillId, out var savedScores)
+                            ? savedScores
+                            : new List<int>();
+                        double? average = scores.Count > 0 ? Math.Round(scores.Average(), 1) : null;
+                        rows.Add(new
+                        {
+                            skillsId = skillId,
+                            name = name ?? "Skill",
+                            averageRating = average,
+                            ratingCount = scores.Count
+                        });
+                    }
+                    return rows;
+                }
+
+                (double? Average, int Count) SummarizeCategoryRatings(IEnumerable<int> skillIds)
+                {
+                    var scores = skillIds.Distinct()
+                        .Where(clientSkillScores.ContainsKey)
+                        .SelectMany(skillId => clientSkillScores[skillId])
+                        .ToList();
+                    double? average = scores.Count > 0 ? Math.Round(scores.Average(), 1) : null;
+                    return (average, scores.Count);
+                }
+
+                var primarySkillRatings = BuildSkillRatingRows(primarySkillIds);
+                var primaryCategorySummary = SummarizeCategoryRatings(primarySkillIds);
+
+                foreach (var group in partTimeSkillIdsByCategory
+                             .OrderBy(g => categoryLookup.TryGetValue(g.Key, out var name) ? name : ""))
+                {
+                    categoryLookup.TryGetValue(group.Key, out var categoryName);
+                    var categorySummary = SummarizeCategoryRatings(group.Value);
+                    partTimeSkills.Add(new
+                    {
+                        categoryId = group.Key,
+                        categoryName = categoryName ?? "Additional Service",
+                        skills = group.Value
+                            .Select(id => skillLookup.TryGetValue(id, out var name) ? name : "Skill")
+                            .Distinct()
+                            .ToList(), // legacy string list retained for compatibility
+                        skillRatings = BuildSkillRatingRows(group.Value),
+                        averageRating = categorySummary.Average,
+                        ratingCount = categorySummary.Count
+                    });
                 }
 
                 var result = new
@@ -630,6 +706,10 @@ namespace Fyp_Backend.Controllers
                     timeSlots = timeSlots,
 
                     primarySkills = primarySkills,
+                    primaryCategoryName = primaryCategoryName,
+                    primarySkillRatings = primarySkillRatings,
+                    primaryCategoryAverageRating = primaryCategorySummary.Average,
+                    primaryCategoryRatingCount = primaryCategorySummary.Count,
                     cnic = worker.Cnic,
                     phone = worker.Phone,
                     age = worker.Age,
@@ -1338,6 +1418,10 @@ namespace Fyp_Backend.Controllers
                             .ThenInclude(r => r.ReviewCriteriaRatings)
                                 .ThenInclude(rc => rc.Criteria)
                     .Include(w => w.Interviews)
+                        .ThenInclude(i => i.Reviews)
+                            .ThenInclude(r => r.ReviewSkillRatings)
+                                .ThenInclude(sr => sr.Skill)
+                    .Include(w => w.Interviews)
                         .ThenInclude(i => i.Client)
                     .FirstOrDefaultAsync(w => w.WorkerId == workerId);
 
@@ -1381,6 +1465,10 @@ namespace Fyp_Backend.Controllers
                                 .OrderBy(x => x.Criteria.SortOrder)
                                 .ThenBy(x => x.CriteriaId)
                                 .Select(x => new { name = x.Criteria.CriteriaName, score = x.Score })
+                                .ToList(),
+                            skillRatings = r.ReviewSkillRatings
+                                .OrderBy(x => x.SkillsId)
+                                .Select(x => new { skillsId = x.SkillsId, name = x.Skill.SkillName ?? "Skill", score = x.Score })
                                 .ToList()
                         }))
                     .ToList();
@@ -1404,6 +1492,7 @@ namespace Fyp_Backend.Controllers
                         r.rating,
                         r.comment,
                         r.criteria,
+                        r.skillRatings,
                         r.date,
                         workedFrom = window.From?.ToString("yyyy-MM-dd"),
                         workedTo = window.To?.ToString("yyyy-MM-dd"),
@@ -1494,9 +1583,51 @@ namespace Fyp_Backend.Controllers
             }
         }
 
+        [HttpGet("GetSkillsForInterview")]
+        [Authorize(Roles = "Client")]
+        public async Task<IActionResult> GetSkillsForInterview([FromQuery] int workerId)
+        {
+            if (workerId <= 0)
+                return BadRequest(new { message = "A valid workerId is required." });
+
+            try
+            {
+                var workerExists = await _context.Workers.AnyAsync(w => w.WorkerId == workerId);
+                if (!workerExists)
+                    return NotFound(new { message = "Worker not found." });
+
+                // Return only the skill/category pairs this worker has actually offered.
+                var offeredSkills = await (
+                    from workerCategory in _context.WorkerCategories
+                    join skill in _context.Skills
+                        on workerCategory.SkillsId equals skill.SkillsId
+                    join category in _context.Categories
+                        on workerCategory.CategoryId equals category.CategoryId
+                    where workerCategory.WorkerId == workerId
+                          && skill.CategoryId == workerCategory.CategoryId
+                    orderby category.CategoryId, skill.SkillName, skill.SkillsId
+                    select new
+                    {
+                        categoryId = category.CategoryId,
+                        categoryName = category.CategoryName,
+                        skillsId = skill.SkillsId,
+                        skillName = skill.SkillName
+                    })
+                    .ToListAsync();
+
+                return Ok(offeredSkills);
+            }
+            catch (Exception ex)
+            {
+                return StatusCode(500, new { message = "Error fetching this worker's offered skills: " + ex.Message });
+            }
+        }
+
         public sealed class BookInterviewRequest
         {
             public int? WorkerId { get; set; }
+            [System.Text.Json.Serialization.JsonPropertyName("SelectedSkillIds")]
+            public List<int>? SelectedSkillIds { get; set; } = new();
             public DateTime? InterviewDate { get; set; }
             public string? Address { get; set; }
             public int? SlotId { get; set; }
@@ -1542,6 +1673,26 @@ namespace Fyp_Backend.Controllers
                 var bookingWorker = await _context.Workers.FindAsync(model.WorkerId.Value);
                 if (bookingWorker == null)
                     return BadRequest(new { message = "Worker not found." });
+
+                // The client must choose one or more skills this worker actually offers.
+                var submittedSkillIds = request.SelectedSkillIds ?? new List<int>();
+                if (submittedSkillIds.Count == 0 || submittedSkillIds.Any(id => id <= 0))
+                    return BadRequest(new { message = "Select at least one valid skill offered by this worker." });
+
+                var selectedSkillIds = submittedSkillIds.Distinct().ToList();
+                var offeredSelectedSkillIds = await (
+                    from workerCategory in _context.WorkerCategories
+                    join skill in _context.Skills
+                        on workerCategory.SkillsId equals skill.SkillsId
+                    where workerCategory.WorkerId == bookingWorker.WorkerId
+                          && workerCategory.CategoryId == skill.CategoryId
+                          && selectedSkillIds.Contains(skill.SkillsId)
+                    select skill.SkillsId)
+                    .Distinct()
+                    .ToListAsync();
+
+                if (offeredSelectedSkillIds.Count != selectedSkillIds.Count)
+                    return BadRequest(new { message = "One or more selected skills are not offered by this worker. Refresh the skill list and try again." });
 
                 // ─── 3. Stop duplicate in-flight requests to the same worker ────────
                 // Optional guard: delete this block if you want one client to be able
@@ -1625,14 +1776,24 @@ namespace Fyp_Backend.Controllers
                 if (string.IsNullOrWhiteSpace(model.Address))
                     model.Address = bookingClient.Address;
 
+                // Keep the interview and its selected-skill snapshot atomic.
+                await using var bookingTransaction = await _context.Database
+                    .BeginTransactionAsync(System.Data.IsolationLevel.Serializable);
+
                 _context.Interviews.Add(model);
+                await _context.SaveChangesAsync();
+
+                _context.InterviewSkills.AddRange(selectedSkillIds.Select(skillId => new InterviewSkill
+                {
+                    InterviewId = model.InterviewId,
+                    SkillsId = skillId
+                }));
                 await _context.SaveChangesAsync();
 
                 // ─── 5c. Race guard for the picked slot ──────────────────────────────
                 // Two clients can tap the same slot within the same second: both pass
-                // the check above, both insert. The row inserted LAST is rolled back, so
-                // exactly one booking wins the slot and the other client gets the same
-                // "already booked" message. Only affects part-time rows with a slot.
+                // the check above. Roll the entire insert (including selected skills)
+                // back if this request loses; exactly one booking wins the slot.
                 if (model.JobType == "Part-Time" && model.SlotId != null)
                 {
                     bool lostTheRace = await _context.Interviews.AnyAsync(i =>
@@ -1649,11 +1810,12 @@ namespace Fyp_Backend.Controllers
 
                     if (lostTheRace)
                     {
-                        _context.Interviews.Remove(model);
-                        await _context.SaveChangesAsync();
+                        await bookingTransaction.RollbackAsync();
                         return Conflict(new { message = "That time slot was just booked by another client, even on a different date. Please pick another slot." });
                     }
                 }
+
+                await bookingTransaction.CommitAsync();
 
                 // Echo the created id + the frozen type back to the app
                 return Ok(new
@@ -1778,6 +1940,16 @@ namespace Fyp_Backend.Controllers
                         id = h.Interview!.WorkerId.ToString(),
                         interviewId = h.InterviewId,
                         name = h.Interview.Worker!.Name,
+                        selectedSkills = _context.InterviewSkills
+                            .Where(selected => selected.InterviewId == h.InterviewId)
+                            .Join(_context.Skills,
+                                selected => selected.SkillsId,
+                                skill => skill.SkillsId,
+                                (selected, skill) => new { skill.SkillsId, skill.SkillName })
+                            .OrderBy(skill => skill.SkillName)
+                            .ThenBy(skill => skill.SkillsId)
+                            .Select(skill => skill.SkillName ?? "Skill")
+                            .ToList(),
                         role = _context.Experiences
                             .Where(e => e.WorkerId == h.Interview.WorkerId)
                             .Select(e => e.WorkAt)
@@ -1919,6 +2091,16 @@ namespace Fyp_Backend.Controllers
                         location = i.Address ?? "N/A",
                         timeRaw = i.InterviewDate,
                         time = i.InterviewDate != null ? i.InterviewDate.Value.ToString("MMM dd, hh:mm tt") : "Not Set",
+                        selectedSkills = _context.InterviewSkills
+                            .Where(selected => selected.InterviewId == i.InterviewId)
+                            .Join(_context.Skills,
+                                selected => selected.SkillsId,
+                                skill => skill.SkillsId,
+                                (selected, skill) => new { skill.SkillsId, skill.SkillName })
+                            .OrderBy(skill => skill.SkillName)
+                            .ThenBy(skill => skill.SkillsId)
+                            .Select(skill => skill.SkillName ?? "Skill")
+                            .ToList(),
                         service = "Interview Request",
                         jobType = i.JobType ?? "Full-Time",
                         isExclusive = i.IsExclusive && i.JobType == "Full-Time",
@@ -1965,6 +2147,16 @@ namespace Fyp_Backend.Controllers
                         location = i.Address ?? "N/A",
                         timeRaw = i.InterviewDate,
                         time = i.InterviewDate != null ? i.InterviewDate.Value.ToString("MMM dd, hh:mm tt") : "Not Set",
+                        selectedSkills = _context.InterviewSkills
+                            .Where(selected => selected.InterviewId == i.InterviewId)
+                            .Join(_context.Skills,
+                                selected => selected.SkillsId,
+                                skill => skill.SkillsId,
+                                (selected, skill) => new { skill.SkillsId, skill.SkillName })
+                            .OrderBy(skill => skill.SkillName)
+                            .ThenBy(skill => skill.SkillsId)
+                            .Select(skill => skill.SkillName ?? "Skill")
+                            .ToList(),
                         service = "Interview Request",
                         jobType = i.JobType ?? "Full-Time",
                         isExclusive = i.IsExclusive && i.JobType == "Full-Time",
@@ -2056,6 +2248,16 @@ namespace Fyp_Backend.Controllers
                         clientId = h.Interview.Client != null ? h.Interview.Client.ClientId : (int?)null,
                         status = h.Interview.Status,
                         date = h.HiringDate != null ? h.HiringDate.Value.ToString("dd-MM-yyyy") : "Pending",
+                        selectedSkills = _context.InterviewSkills
+                            .Where(selected => selected.InterviewId == h.InterviewId)
+                            .Join(_context.Skills,
+                                selected => selected.SkillsId,
+                                skill => skill.SkillsId,
+                                (selected, skill) => new { skill.SkillsId, skill.SkillName })
+                            .OrderBy(skill => skill.SkillName)
+                            .ThenBy(skill => skill.SkillsId)
+                            .Select(skill => skill.SkillName ?? "Skill")
+                            .ToList(),
                         role = _context.WorkerCategories.Where(wc => wc.WorkerId == h.Interview.WorkerId).Join(_context.Categories, wc => wc.CategoryId, c => c.CategoryId, (wc, c) => c.CategoryName).FirstOrDefault() ?? "Worker",
                         address = h.Address ?? "Pending",
                         hiringDecision = h.HiringDecision ?? "Pending",
@@ -2177,6 +2379,7 @@ namespace Fyp_Backend.Controllers
                         date = item.date,
                         role = item.role,
                         address = item.address,
+                        selectedSkills = item.selectedSkills,
                         message = msg,
                         type = type,
                         // These four are carried through from the query above. This endpoint
@@ -2276,9 +2479,32 @@ namespace Fyp_Backend.Controllers
                         InterviewId = h.InterviewId,
                         WorkerId = h.Interview!.WorkerId,
                         WorkerName = h.Interview.Worker!.Name,
-                        WorkerSkill = _context.Experiences
-                            .Where(e => e.WorkerId == h.Interview.WorkerId)
-                            .Select(e => e.WorkAt) // Or your corresponding skill field mapping
+                        selectedSkills = _context.InterviewSkills
+                            .Where(selected => selected.InterviewId == h.InterviewId)
+                            .Join(_context.Skills,
+                                selected => selected.SkillsId,
+                                skill => skill.SkillsId,
+                                (selected, skill) => new { skill.SkillsId, skill.SkillName })
+                            .OrderBy(skill => skill.SkillName)
+                            .ThenBy(skill => skill.SkillsId)
+                            .Select(skill => skill.SkillName ?? "Skill")
+                            .ToList(),
+                        // Worker_Category stores IDs only; join Category for the name.
+                        // There is no persisted primary marker, so use a stable category order.
+                        WorkerCategory = _context.WorkerCategories
+                            .Where(wc => wc.WorkerId == h.Interview!.WorkerId)
+                            .Join(_context.Categories,
+                                wc => wc.CategoryId,
+                                category => category.CategoryId,
+                                (wc, category) => new
+                                {
+                                    wc.CategoryId,
+                                    wc.SkillsId,
+                                    category.CategoryName
+                                })
+                            .OrderBy(role => role.CategoryId)
+                            .ThenBy(role => role.SkillsId)
+                            .Select(role => role.CategoryName)
                             .FirstOrDefault() ?? "General Assistant",
                         WorkerImage = h.Interview.Worker.Picture,
 
@@ -2675,6 +2901,10 @@ namespace Fyp_Backend.Controllers
                             .OrderBy(x => x.Criteria.SortOrder)
                             .ThenBy(x => x.CriteriaId)
                             .Select(x => new { name = x.Criteria.CriteriaName, score = x.Score })
+                            .ToList(),
+                        skillRatings = r.ReviewSkillRatings
+                            .OrderBy(x => x.SkillsId)
+                            .Select(x => new { skillsId = x.SkillsId, name = x.Skill.SkillName ?? "Skill", score = x.Score })
                             .ToList()
                     })
                     .OrderByDescending(r => r.ReviewDate)
@@ -2718,7 +2948,8 @@ namespace Fyp_Backend.Controllers
                         rating = clientReviewRow.Rating ?? 0,
                         comment = clientReviewRow.Comment ?? "",
                         date = clientReviewRow.ReviewDate?.ToString("MMM dd, yyyy") ?? "N/A",
-                        criteria = clientReviewRow.criteria
+                        criteria = clientReviewRow.criteria,
+                        skillRatings = clientReviewRow.skillRatings
                     };
                 }
 
@@ -2769,7 +3000,15 @@ namespace Fyp_Backend.Controllers
                             throw new ResignationWorkflowException(400, "Please enter review remarks before confirming.");
                         var criteria = await BuildCriteriaRatingsAsync(model.InterviewId, model.CriteriaScores ?? new());
                         if (criteria.Error != null) throw new ResignationWorkflowException(400, criteria.Error);
-                        return new Review { Rating = criteria.Average, Comment = model.Comment.Trim(), ReviewCriteriaRatings = criteria.Rows };
+                        var skillRatings = await BuildSkillRatingsAsync(model.InterviewId, model.SkillScores ?? new());
+                        if (skillRatings.Error != null) throw new ResignationWorkflowException(400, skillRatings.Error);
+                        return new Review
+                        {
+                            Rating = criteria.Average,
+                            Comment = model.Comment.Trim(),
+                            ReviewCriteriaRatings = criteria.Rows,
+                            ReviewSkillRatings = skillRatings.Rows
+                        };
                     }, ct);
                 return Ok(new
                 {
@@ -2812,9 +3051,12 @@ namespace Fyp_Backend.Controllers
 
                 // Add the client's criteria-scored closing review to the review log.
                 // The overall Rating is derived from the criteria, not sent by the client.
-                var criteria = await BuildCriteriaRatingsAsync(request.InterviewId, request.CriteriaScores);
+                var criteria = await BuildCriteriaRatingsAsync(request.InterviewId, request.CriteriaScores ?? new());
                 if (criteria.Error != null)
                     return BadRequest(new { message = criteria.Error });
+                var skillRatings = await BuildSkillRatingsAsync(request.InterviewId, request.SkillScores ?? new());
+                if (skillRatings.Error != null)
+                    return BadRequest(new { message = skillRatings.Error });
 
                 var review = new Review
                 {
@@ -2823,7 +3065,8 @@ namespace Fyp_Backend.Controllers
                     Comment = request.Remarks,
                     ReviewerRole = "Client",
                     ReviewDate = DateTime.Now,
-                    ReviewCriteriaRatings = criteria.Rows
+                    ReviewCriteriaRatings = criteria.Rows,
+                    ReviewSkillRatings = skillRatings.Rows
                 };
                 _context.Reviews.Add(review);
 
@@ -2885,8 +3128,19 @@ namespace Fyp_Backend.Controllers
                         workerSkill = _context.WorkerCategories.Where(wc => wc.WorkerId == i.WorkerId)
                                                               .Join(_context.Categories, wc => wc.CategoryId, c => c.CategoryId, (wc, c) => c.CategoryName)
                                                               .FirstOrDefault() ?? "Worker",
+                        selectedSkills = _context.InterviewSkills
+                            .Where(selected => selected.InterviewId == i.InterviewId)
+                            .Join(_context.Skills,
+                                selected => selected.SkillsId,
+                                skill => skill.SkillsId,
+                                (selected, skill) => new { skill.SkillsId, skill.SkillName })
+                            .OrderBy(skill => skill.SkillName)
+                            .ThenBy(skill => skill.SkillsId)
+                            .Select(skill => skill.SkillName ?? "Skill")
+                            .ToList(),
                         status = i.Status,
                         jobType = i.JobType ?? "Full-Time",
+                        isExclusive = i.IsExclusive && i.JobType == "Full-Time",
                         slotId = i.SlotId,
                         slotStartTime = _context.WorkerTimeSlots.Where(s => s.Id == i.SlotId).Select(s => (TimeSpan?)s.StartTime).FirstOrDefault(),
                         slotEndTime = _context.WorkerTimeSlots.Where(s => s.Id == i.SlotId).Select(s => (TimeSpan?)s.EndTime).FirstOrDefault(),
@@ -3071,6 +3325,7 @@ namespace Fyp_Backend.Controllers
             public int Rating { get; set; }
 
             public List<CriteriaScoreDto> CriteriaScores { get; set; } = new();
+            public List<SkillScoreDto> SkillScores { get; set; } = new();
         }
 
         [HttpGet("GetWorkerResignationReview/{id}")]
@@ -3416,54 +3671,59 @@ namespace Fyp_Backend.Controllers
             }
         }
 
-        // ─── CRITERIA-BASED CLOSING REVIEWS ─────────────────────────────────────
-        // The profession a review is about is derived, never stored:
-        //   Interview -> Worker -> Worker_Category -> Category -> ReviewCriteria
-        // so no Category_ID column is needed on Interview or Reviews.
+        // ─── CLIENT-TO-WORKER CLOSING REVIEWS ────────────────────────────────────
+        // New reviews keep the common-criteria average in Reviews.Rating and store
+        // each interview-selected skill score separately in Review_Skill_Rating.
 
         /// <summary>
-        /// Returns the criteria the client must score when closing the contract
-        /// behind <paramref name="interviewId"/>: the common set plus every
-        /// criterion belonging to a category that worker holds.
+        /// Returns common closing-review criteria and only the skills selected
+        /// for this interview. Category-specific criteria are not part of this form.
         /// </summary>
         [HttpGet("GetReviewCriteria")]
+        [Authorize(Roles = "Client")]
         public async Task<IActionResult> GetReviewCriteria([FromQuery] int interviewId)
         {
+            if (ActorId is not int clientId) return Unauthorized();
             try
             {
-                var workerId = await _context.Interviews
-                    .Where(i => i.InterviewId == interviewId)
-                    .Select(i => i.WorkerId)
+                var interview = await _context.Interviews
+                    .Where(i => i.InterviewId == interviewId && i.ClientId == clientId)
+                    .Select(i => new { i.WorkerId })
                     .FirstOrDefaultAsync();
 
-                if (workerId == null)
+                if (interview == null)
                     return NotFound(new { message = "Interview not found." });
 
-                var criteria = await LoadApplicableCriteriaAsync(workerId.Value);
-
-                var common = criteria
-                    .Where(c => c.CategoryId == null)
+                var common = await _context.ReviewCriteria
+                    .Where(c => c.IsActive && c.CategoryId == null)
+                    .OrderBy(c => c.SortOrder)
+                    .ThenBy(c => c.CriteriaId)
                     .Select(c => new { criteriaId = c.CriteriaId, name = c.CriteriaName })
-                    .ToList();
+                    .ToListAsync();
 
-                var professions = criteria
-                    .Where(c => c.CategoryId != null)
-                    .GroupBy(c => new { c.CategoryId, c.CategoryName })
-                    .Select(g => new
+                var selectedSkills = await _context.InterviewSkills
+                    .Where(x => x.InterviewId == interviewId)
+                    .Join(_context.Skills, x => x.SkillsId, skill => skill.SkillsId, (x, skill) => skill)
+                    .OrderBy(skill => skill.SkillName)
+                    .ThenBy(skill => skill.SkillsId)
+                    .Select(skill => new
                     {
-                        categoryId = g.Key.CategoryId,
-                        categoryName = g.Key.CategoryName,
-                        criteria = g.Select(c => new { criteriaId = c.CriteriaId, name = c.CriteriaName }).ToList()
+                        skillsId = skill.SkillsId,
+                        name = skill.SkillName ?? "Skill",
+                        categoryName = skill.Category != null ? skill.Category.CategoryName : null
                     })
-                    .ToList();
+                    .ToListAsync();
 
                 return Ok(new
                 {
                     interviewId,
-                    workerId,
+                    workerId = interview.WorkerId,
                     common,
-                    professions,
-                    totalCriteria = common.Count + professions.Sum(p => p.criteria.Count),
+                    // Kept as an empty array for clients that still read this old field.
+                    professions = Array.Empty<object>(),
+                    selectedSkills,
+                    totalCriteria = common.Count,
+                    totalSkills = selectedSkills.Count,
                     allMandatory = true
                 });
             }
@@ -3474,60 +3734,47 @@ namespace Fyp_Backend.Controllers
         }
 
         /// <summary>
-        /// Every active criterion that applies to this worker: the common set
-        /// (CategoryId == null) plus each criterion scoped to a category the
-        /// worker actually holds.
+        /// The active generic set shared by every worker. Profession-specific
+        /// criteria are deliberately excluded from client closing reviews.
         /// </summary>
-        private async Task<List<CriteriaProjection>> LoadApplicableCriteriaAsync(int workerId)
+        private async Task<List<CriteriaProjection>> LoadCommonCriteriaAsync()
         {
-            // Worker_Category is a (worker, category, skill) triple, so a worker with
-            // three skills in one category still resolves to exactly one distinct
-            // category here. Distinct() also covers the rare multi-category worker.
-            var categoryIds = await _context.WorkerCategories
-                .Where(wc => wc.WorkerId == workerId)
-                .Select(wc => wc.CategoryId)
-                .Distinct()
-                .ToListAsync();
-
             return await _context.ReviewCriteria
-                .Where(c => c.IsActive && (c.CategoryId == null || categoryIds.Contains(c.CategoryId!.Value)))
-                .OrderBy(c => c.CategoryId)   // NULLs first in SQL Server => common criteria lead
-                .ThenBy(c => c.SortOrder)
+                .Where(c => c.IsActive && c.CategoryId == null)
+                .OrderBy(c => c.SortOrder)
+                .ThenBy(c => c.CriteriaId)
                 .Select(c => new CriteriaProjection
                 {
                     CriteriaId = c.CriteriaId,
                     CategoryId = c.CategoryId,
-                    CategoryName = c.Category != null ? c.Category.CategoryName : null,
+                    CategoryName = null,
                     CriteriaName = c.CriteriaName,
                     SortOrder = c.SortOrder
                 })
                 .ToListAsync();
         }
 
-        /// <summary>
-        /// Validates the submitted scores against the worker's applicable criteria
-        /// (all mandatory, nothing extra, each 1-5) and returns the rows to persist
-        /// plus the overall average that goes into Reviews.Rating.
-        /// </summary>
         private async Task<CriteriaBuildResult> BuildCriteriaRatingsAsync(
             int? interviewId, List<CriteriaScoreDto> submitted)
         {
             var result = new CriteriaBuildResult();
+            submitted ??= new List<CriteriaScoreDto>();
 
-            var workerId = await _context.Interviews
-                .Where(i => i.InterviewId == interviewId)
-                .Select(i => i.WorkerId)
-                .FirstOrDefaultAsync();
-
-            if (workerId == null)
+            if (!await _context.Interviews.AnyAsync(i => i.InterviewId == interviewId))
             {
-                result.Error = "Interview or its worker could not be found.";
+                result.Error = "Interview could not be found.";
                 return result;
             }
 
-            var applicable = await LoadApplicableCriteriaAsync(workerId.Value);
+            var applicable = await LoadCommonCriteriaAsync();
             var requiredIds = applicable.Select(c => c.CriteriaId).ToHashSet();
             var submittedIds = submitted.Select(s => s.CriteriaId).ToHashSet();
+
+            if (requiredIds.Count == 0)
+            {
+                result.Error = "No active common review criteria are configured.";
+                return result;
+            }
 
             if (submitted.Count == 0)
             {
@@ -3538,14 +3785,14 @@ namespace Fyp_Backend.Controllers
             var missing = requiredIds.Except(submittedIds).ToList();
             if (missing.Count > 0)
             {
-                result.Error = "Please rate every criterion. Missing criteria: " + string.Join(", ", missing);
+                result.Error = "Please rate every common criterion. Missing criteria: " + string.Join(", ", missing);
                 return result;
             }
 
             var unexpected = submittedIds.Except(requiredIds).ToList();
             if (unexpected.Count > 0)
             {
-                result.Error = "Criteria that do not apply to this worker were submitted: " + string.Join(", ", unexpected);
+                result.Error = "Only common criteria may be submitted for this review.";
                 return result;
             }
 
@@ -3557,7 +3804,7 @@ namespace Fyp_Backend.Controllers
 
             if (submitted.Any(s => s.Score < 1 || s.Score > 5))
             {
-                result.Error = "Each criterion must be scored between 1 and 5.";
+                result.Error = "Each common criterion must be scored between 1 and 5.";
                 return result;
             }
 
@@ -3565,14 +3812,76 @@ namespace Fyp_Backend.Controllers
                 .Select(s => new ReviewCriteriaRating { CriteriaId = s.CriteriaId, Score = s.Score })
                 .ToList();
 
-            // Overall = mean of the criteria scores, rounded to 2dp to fit decimal(3,2).
+            // Overall = mean of common criteria only; selected-skill scores stay separate.
             result.Average = Math.Round((decimal)submitted.Average(s => s.Score), 2);
+            return result;
+        }
+
+        /// <summary>
+        /// Requires one valid score for every skill in the interview snapshot;
+        /// rejects duplicates, unselected skills and scores outside 1-5.
+        /// </summary>
+        private async Task<SkillBuildResult> BuildSkillRatingsAsync(
+            int? interviewId, List<SkillScoreDto> submitted)
+        {
+            var result = new SkillBuildResult();
+            submitted ??= new List<SkillScoreDto>();
+
+            if (interviewId is not int id || !await _context.Interviews.AnyAsync(i => i.InterviewId == id))
+            {
+                result.Error = "Interview could not be found.";
+                return result;
+            }
+
+            var requiredIds = await _context.InterviewSkills
+                .Where(x => x.InterviewId == id)
+                .Select(x => x.SkillsId)
+                .Distinct()
+                .ToListAsync();
+            var requiredSet = requiredIds.ToHashSet();
+            var submittedIds = submitted.Select(x => x.SkillsId).ToHashSet();
+
+            if (submittedIds.Count != submitted.Count)
+            {
+                result.Error = "A selected skill was scored more than once.";
+                return result;
+            }
+
+            var missing = requiredSet.Except(submittedIds).ToList();
+            if (missing.Count > 0)
+            {
+                result.Error = "Please rate every skill selected for this interview.";
+                return result;
+            }
+
+            var unexpected = submittedIds.Except(requiredSet).ToList();
+            if (unexpected.Count > 0)
+            {
+                result.Error = "Only skills selected for this interview may be scored.";
+                return result;
+            }
+
+            if (submitted.Any(x => x.Score < 1 || x.Score > 5))
+            {
+                result.Error = "Each selected skill must be scored between 1 and 5.";
+                return result;
+            }
+
+            result.Rows = submitted
+                .Select(x => new ReviewSkillRating { SkillsId = x.SkillsId, Score = x.Score })
+                .ToList();
             return result;
         }
 
         public class CriteriaScoreDto
         {
             public int CriteriaId { get; set; }
+            public int Score { get; set; }
+        }
+
+        public class SkillScoreDto
+        {
+            public int SkillsId { get; set; }
             public int Score { get; set; }
         }
 
@@ -3583,12 +3892,19 @@ namespace Fyp_Backend.Controllers
             public int? ResignationId { get; set; }
             public string? Comment { get; set; }
             public List<CriteriaScoreDto> CriteriaScores { get; set; } = new();
+            public List<SkillScoreDto> SkillScores { get; set; } = new();
         }
 
         public class CriteriaBuildResult
         {
             public decimal Average { get; set; }
             public List<ReviewCriteriaRating> Rows { get; set; } = new();
+            public string? Error { get; set; }
+        }
+
+        public class SkillBuildResult
+        {
+            public List<ReviewSkillRating> Rows { get; set; } = new();
             public string? Error { get; set; }
         }
 

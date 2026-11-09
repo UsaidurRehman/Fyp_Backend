@@ -27,7 +27,7 @@ public class CourseCertificatesController : ControllerBase
     public async Task<IActionResult> Verify(string code)
     {
         var c = await Projection().FirstOrDefaultAsync(x => x.CertificateCode == code);
-        return c == null ? NotFound(new { isValid = false, message = "Certificate not found." }) : Ok(c);
+        return c == null ? NotFound(new { message = "Certificate not found." }) : Ok(c);
     }
 
     [Authorize]
@@ -54,9 +54,7 @@ public class CourseCertificatesController : ControllerBase
         StartDate = c.Course.StartDate,
         EndDate = c.Course.EndDate,
         CompletionDateUtc = c.Enrollment.CompletionDateUtc,
-        IssuedDateUtc = c.IssuedDateUtc,
-        IsRevoked = c.IsRevoked,
-        IsValid = !c.IsRevoked
+        IssuedDateUtc = c.IssuedDateUtc
     });
 
     public class CertificateView
@@ -72,7 +70,5 @@ public class CourseCertificatesController : ControllerBase
         public DateOnly EndDate { get; set; }
         public DateTime? CompletionDateUtc { get; set; }
         public DateTime IssuedDateUtc { get; set; }
-        public bool IsRevoked { get; set; }
-        public bool IsValid { get; set; }
     }
 }

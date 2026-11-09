@@ -20,10 +20,12 @@ public partial class Fyp1Context : DbContext
     public virtual DbSet<Client> Clients { get; set; }
     public virtual DbSet<Experience> Experiences { get; set; }
     public virtual DbSet<Interview> Interviews { get; set; }
+    public virtual DbSet<InterviewSkill> InterviewSkills { get; set; }
     public virtual DbSet<Resignation> Resignations { get; set; }
     public virtual DbSet<Review> Reviews { get; set; }
     public virtual DbSet<ReviewCriteria> ReviewCriteria { get; set; }
     public virtual DbSet<ReviewCriteriaRating> ReviewCriteriaRatings { get; set; }
+    public virtual DbSet<ReviewSkillRating> ReviewSkillRatings { get; set; }
     public virtual DbSet<Skill> Skills { get; set; }
     public virtual DbSet<Termination> Terminations { get; set; }
     public virtual DbSet<Worker> Workers { get; set; }
@@ -139,14 +141,33 @@ public partial class Fyp1Context : DbContext
                 .HasConstraintName("FK__Interview__Worke__5AEE82B9");
         });
 
+        modelBuilder.Entity<InterviewSkill>(entity =>
+        {
+            entity.ToTable("Interview_Skill");
+            entity.HasKey(e => new { e.InterviewId, e.SkillsId })
+                .HasName("PK_Interview_Skill");
+            entity.Property(e => e.InterviewId).HasColumnName("Interview_ID");
+            entity.Property(e => e.SkillsId).HasColumnName("Skills_ID");
+
+            entity.HasOne<Interview>()
+                .WithMany()
+                .HasForeignKey(e => e.InterviewId)
+                .OnDelete(DeleteBehavior.Cascade);
+
+            entity.HasOne<Skill>()
+                .WithMany()
+                .HasForeignKey(e => e.SkillsId)
+                .OnDelete(DeleteBehavior.Restrict);
+        });
+
         modelBuilder.Entity<Review>(entity =>
         {
             entity.HasKey(e => e.ReviewId).HasName("PK__Reviews__F85DA7EB6071CC75");
             entity.Property(e => e.ReviewId).HasColumnName("Review_ID");
             entity.Property(e => e.Comment).HasColumnType("text");
             entity.Property(e => e.InterviewId).HasColumnName("Interview_ID");
-            // Overall is now the average of the per-criterion scores, so it holds
-            // fractional values (e.g. 4.33) rather than a hand-picked 1-5 int.
+            // Overall is the average of common-criterion scores only, so it holds
+            // fractional values (e.g. 4.33); selected-skill scores are stored separately.
             entity.Property(e => e.Rating).HasColumnType("decimal(3,2)");
             entity.Property(e => e.ReviewDate).HasDefaultValueSql("(getdate())").HasColumnType("datetime");
             entity.Property(e => e.ReviewerRole)
@@ -193,6 +214,23 @@ public partial class Fyp1Context : DbContext
 
             entity.HasOne(d => d.Criteria).WithMany(p => p.ReviewCriteriaRatings)
                 .HasForeignKey(d => d.CriteriaId)
+                .OnDelete(DeleteBehavior.Restrict);
+        });
+
+        modelBuilder.Entity<ReviewSkillRating>(entity =>
+        {
+            entity.ToTable("Review_Skill_Rating");
+            entity.HasKey(e => new { e.ReviewId, e.SkillsId });
+            entity.Property(e => e.ReviewId).HasColumnName("Review_ID");
+            entity.Property(e => e.SkillsId).HasColumnName("Skills_ID");
+            entity.Property(e => e.Score).HasColumnName("Score");
+
+            entity.HasOne(d => d.Review).WithMany(p => p.ReviewSkillRatings)
+                .HasForeignKey(d => d.ReviewId)
+                .OnDelete(DeleteBehavior.Cascade);
+
+            entity.HasOne(d => d.Skill).WithMany()
+                .HasForeignKey(d => d.SkillsId)
                 .OnDelete(DeleteBehavior.Restrict);
         });
 
