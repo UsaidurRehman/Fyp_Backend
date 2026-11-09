@@ -3328,6 +3328,41 @@ namespace Fyp_Backend.Controllers
             public List<SkillScoreDto> SkillScores { get; set; } = new();
         }
 
+        [HttpGet("GetWorkerPendingClientReviews")]
+        [Authorize(Roles = "Worker")]
+        public async Task<IActionResult> GetWorkerPendingClientReviews(
+            [FromServices] ResignationWorkflowService workflow, CancellationToken ct = default)
+        {
+            if (ActorId is not int workerId) return Unauthorized();
+            try
+            {
+                // Apply any elapsed notice-period acceptances before checking which
+                // client reviews are available to this worker.
+                await workflow.ProcessDueAsync(workerId: workerId, ct: ct);
+                var items = await _context.Resignations.AsNoTracking()
+                    .Where(r => r.Interview != null && r.Interview.WorkerId == workerId &&
+                        r.Interview.Status == "Resigned" &&
+                        (r.AcceptedAtUtc != null || r.NoticeEndsAtUtc == null) &&
+                        !_context.Reviews.Any(review => review.InterviewId == r.InterviewId &&
+                            review.ReviewerRole == "Worker"))
+                    .OrderByDescending(r => r.AcceptedAtUtc)
+                    .ThenByDescending(r => r.SubmittedDate)
+                    .ThenByDescending(r => r.ResignationId)
+                    .Select(r => new
+                    {
+                        resignationId = r.ResignationId,
+                        interviewId = r.InterviewId,
+                        clientName = r.Interview!.Client != null ? r.Interview.Client.Name : "Client",
+                        clientPicture = r.Interview.Client != null ? r.Interview.Client.Picture : null,
+                        acceptedAtUtc = r.AcceptedAtUtc
+                    })
+                    .ToListAsync(ct);
+                return Ok(new { items, count = items.Count });
+            }
+            catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }
+            catch (Exception ex) { return WorkflowFailure(ex); }
+        }
+
         [HttpGet("GetWorkerResignationReview/{id}")]
         [Authorize(Roles = "Worker")]
         public async Task<IActionResult> GetWorkerResignationReview(int id,

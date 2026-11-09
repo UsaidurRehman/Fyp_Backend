@@ -186,7 +186,11 @@ public class CompanyCoursesController : ControllerBase
         if (enrollment == null) return NotFound(new { message = "Enrollment not found." });
         if (enrollment.Status == "Withdrawn") return BadRequest(new { message = "A withdrawn enrollment cannot be completed." });
         if (enrollment.Certificate != null)
+        {
+            await EnsureCourseCertificateNotificationAsync(enrollment.Certificate, enrollment.Course.CourseName);
+            await tx.CommitAsync();
             return Ok(new { message = "Already completed.", certificateId = enrollment.Certificate.CertificateID, certificateCode = enrollment.Certificate.CertificateCode });
+        }
 
         enrollment.Status = "Completed"; enrollment.CompletionDateUtc = DateTime.UtcNow; enrollment.UpdatedAtUtc = DateTime.UtcNow;
         var code = await UniqueCode();
@@ -201,8 +205,30 @@ public class CompanyCoursesController : ControllerBase
             CreatedAtUtc = DateTime.UtcNow
         };
         _db.CourseCertificates.Add(certificate);
-        await _db.SaveChangesAsync(); await tx.CommitAsync();
+        await _db.SaveChangesAsync(); // Persist first so CertificateID is available for the notification.
+        await EnsureCourseCertificateNotificationAsync(certificate, enrollment.Course.CourseName);
+        await tx.CommitAsync();
         return Ok(new { message = "Worker completed the course and certificate was issued.", certificateId = certificate.CertificateID, certificateCode = code });
+    }
+
+    private async Task EnsureCourseCertificateNotificationAsync(CourseCertificate certificate, string courseName)
+    {
+        var key = $"course-certificate:{certificate.CertificateID}";
+        if (await _db.WorkerNotifications.AnyAsync(n =>
+                n.WorkerId == certificate.WorkerID && n.NotificationKey == key))
+            return;
+
+        _db.WorkerNotifications.Add(new WorkerNotification
+        {
+            WorkerId = certificate.WorkerID,
+            NotificationKey = key,
+            Type = "course-certificate",
+            SourceId = certificate.CertificateID,
+            Title = "Course certificate issued",
+            Message = $"Your course-completion certificate for {courseName} is ready to view.",
+            CreatedAtUtc = certificate.IssuedDateUtc
+        });
+        await _db.SaveChangesAsync();
     }
 
     private async Task<string> UniqueCode()

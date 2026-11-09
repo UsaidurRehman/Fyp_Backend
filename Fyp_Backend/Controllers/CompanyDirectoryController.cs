@@ -482,6 +482,7 @@ namespace Fyp_Backend.Controllers
                 if (string.IsNullOrWhiteSpace(dto.CertificateTitle))
                     return BadRequest(new { message = "Certificate title is required." });
 
+                await using var transaction = await _context.Database.BeginTransactionAsync();
                 var certification = new WorkerCertification
                 {
                     WorkerID = dto.WorkerId,
@@ -492,7 +493,20 @@ namespace Fyp_Backend.Controllers
                 };
 
                 _context.WorkerCertifications.Add(certification);
+                await _context.SaveChangesAsync(); // Save first to get the certification ID for the stable notification key.
+
+                _context.WorkerNotifications.Add(new WorkerNotification
+                {
+                    WorkerId = certification.WorkerID,
+                    NotificationKey = $"company-certificate:{certification.CertificationID}",
+                    Type = "company-certificate",
+                    SourceId = certification.WorkerID,
+                    Title = "Company certificate issued",
+                    Message = $"Your company-issued certificate \"{certification.CertificateTitle}\" is available in your certificates.",
+                    CreatedAtUtc = DateTime.UtcNow
+                });
                 await _context.SaveChangesAsync();
+                await transaction.CommitAsync();
 
                 return Ok(new { status = "Success", message = "Certificate issued and published successfully!" });
             }

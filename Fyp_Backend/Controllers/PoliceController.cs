@@ -195,6 +195,19 @@ namespace Fyp_Backend.Controllers
                 cert.IsRevoked = false;
 
                 if (!isRenewal) _context.PoliceRecords.Add(cert);
+
+                var notificationVerb = isRenewal ? "renewed" : "issued";
+                _context.WorkerNotifications.Add(new WorkerNotification
+                {
+                    WorkerId = worker.WorkerId,
+                    NotificationKey = $"police-certificate:{worker.WorkerId}:{now.Ticks}",
+                    Type = "police-certificate",
+                    SourceId = worker.WorkerId,
+                    Title = isRenewal ? "Character certificate renewed" : "Character certificate issued",
+                    Message = $"Your police character certificate was {notificationVerb}. Certificate No. {cert.CertificateNo}; valid until {expiry:dd MMM yyyy}.",
+                    CreatedAtUtc = DateTime.UtcNow
+                });
+
                 await _context.SaveChangesAsync();
 
                 return Ok(new
